@@ -36,7 +36,7 @@ from ember_native_faster_gs.gaussian_wrapping.runtime import (
     radegs_render_op,
 )
 
-_SUPPORTED_OUTPUTS = output_set("alpha", "depth", "normals")
+SUPPORTED_OUTPUTS = output_set("alpha", "depth", "normals")
 
 AlphaTensor = Float[Tensor, " num_cams height width"]
 DepthTensor = Float[Tensor, " num_cams height width"]
@@ -82,7 +82,9 @@ class GaussianWrappingNativeRenderOptions(RenderOptions):
 
 
 @dataclass(frozen=True)
-class _CameraStageParams:
+class CameraStageParams:
+    """Camera tensors and scalars in the upstream CUDA layout."""
+
     viewmatrix: Float[Tensor, "4 4"]
     projmatrix: Float[Tensor, "4 4"]
     camera_position: Float[Tensor, " 3"]
@@ -93,7 +95,8 @@ class _CameraStageParams:
 
 
 @beartype
-def _validate_inputs(scene: GaussianScene3D, camera: CameraState) -> None:
+def validate_inputs(scene: GaussianScene3D, camera: CameraState) -> None:
+    """Validate the CUDA, shape, and camera convention requirements."""
     if scene.center_position.device.type != "cuda":
         raise ValueError("Gaussian Wrapping requires scene tensors on CUDA.")
     if camera.cam_to_world.device.type != "cuda":
@@ -115,7 +118,8 @@ def _validate_inputs(scene: GaussianScene3D, camera: CameraState) -> None:
         )
 
 
-def _empty_float(scene: GaussianScene3D) -> Float[Tensor, " empty"]:
+def empty_float_tensor(scene: GaussianScene3D) -> Float[Tensor, " empty"]:
+    """Return an empty float tensor on the scene device."""
     return torch.empty(
         (0,),
         dtype=scene.center_position.dtype,
@@ -123,26 +127,27 @@ def _empty_float(scene: GaussianScene3D) -> Float[Tensor, " empty"]:
     )
 
 
-def _feature_inputs(
+def feature_inputs(
     scene: GaussianScene3D,
     options: GaussianWrappingNativeRenderOptions,
 ) -> tuple[Tensor, Tensor]:
+    """Split scene features into direct RGB and spherical harmonics inputs."""
     if options.color_source == "direct_rgb":
         if scene.feature.ndim != 2 or scene.feature.shape[-1] != 3:
             raise ValueError(
                 "direct_rgb color_source expects scene.feature with shape "
                 f"(num_splats, 3); got {tuple(scene.feature.shape)}."
             )
-        return scene.feature.contiguous(), _empty_float(scene)
+        return scene.feature.contiguous(), empty_float_tensor(scene)
     if scene.feature.ndim != 3:
         raise ValueError(
             "spherical_harmonics color_source expects scene.feature with "
             f"shape (num_splats, sh_coeffs, 3); got {tuple(scene.feature.shape)}."
         )
-    return _empty_float(scene), scene.feature.contiguous()
+    return empty_float_tensor(scene), scene.feature.contiguous()
 
 
-def _projection_matrix(
+def projection_matrix(
     *,
     tan_fovx: float,
     tan_fovy: float,
@@ -150,6 +155,7 @@ def _projection_matrix(
     far_plane: float,
     reference: Tensor,
 ) -> Float[Tensor, "4 4"]:
+    """Build the transposed projection matrix expected by the CUDA kernels."""
     projection = torch.zeros(
         (4, 4),
         dtype=reference.dtype,
@@ -163,11 +169,12 @@ def _projection_matrix(
     return projection.mT.contiguous()
 
 
-def _camera_stage_params(
+def camera_stage_params(
     camera: CameraState,
     camera_index: int,
     options: GaussianWrappingNativeRenderOptions,
-) -> _CameraStageParams:
+) -> CameraStageParams:
+    """Pack one camera into the upstream stage parameter layout."""
     intrinsics = camera.get_intrinsics()[camera_index]
     image_width = int(camera.width[camera_index].item())
     image_height = int(camera.height[camera_index].item())
@@ -177,14 +184,14 @@ def _camera_stage_params(
     tan_fovy = image_height / (2.0 * focal_y)
     world_to_camera = torch.linalg.inv(camera.cam_to_world[camera_index])
     viewmatrix = world_to_camera.mT.contiguous()
-    projection = _projection_matrix(
+    projection = projection_matrix(
         tan_fovx=tan_fovx,
         tan_fovy=tan_fovy,
         near_plane=options.near_plane,
         far_plane=options.far_plane,
         reference=camera.cam_to_world,
     )
-    return _CameraStageParams(
+    return CameraStageParams(
         viewmatrix=viewmatrix,
         projmatrix=(viewmatrix[None].bmm(projection[None])).squeeze(0),
         camera_position=camera.cam_to_world[camera_index, :3, 3].contiguous(),
@@ -195,12 +202,13 @@ def _camera_stage_params(
     )
 
 
-def _scene_stage_inputs(
+def scene_stage_inputs(
     scene: GaussianScene3D,
     options: GaussianWrappingNativeRenderOptions,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    colors, spherical_harmonics = _feature_inputs(scene, options)
-    empty = _empty_float(scene)
+    """Pack scene tensors into the shared Gaussian Wrapping stage layout."""
+    colors, spherical_harmonics = feature_inputs(scene, options)
+    empty = empty_float_tensor(scene)
     return (
         scene.center_position.contiguous(),
         torch.sigmoid(scene.logit_opacity)[:, None].contiguous(),
@@ -213,11 +221,14 @@ def _scene_stage_inputs(
     )
 
 
-def _render_ours_single_camera(
+def render_ours_single_camera(
     scene: GaussianScene3D,
-    camera_params: _CameraStageParams,
+    camera_params: CameraStageParams,
     options: GaussianWrappingNativeRenderOptions,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    """Render one camera through the upstream `ours` rasterizer variant."""
+    # Keep the stage packing separate from the native launch so the argument
+    # order can be compared directly with the upstream extension signature.
     (
         center_positions,
         opacities,
@@ -226,10 +237,12 @@ def _render_ours_single_camera(
         colors,
         spherical_harmonics,
         empty,
-        _empty_extra,
-    ) = _scene_stage_inputs(scene, options)
+        _,
+    ) = scene_stage_inputs(scene, options)
+    # The native stage returns scratch buffers for backward compatibility; this
+    # wrapper keeps only the user-facing render and loss tensors.
     (
-        _rendered_count,
+        _,
         color,
         alpha,
         normal,
@@ -238,10 +251,10 @@ def _render_ours_single_camera(
         depth_sum,
         depth_square,
         radii,
-        _geom_buffer,
-        _binning_buffer,
-        _image_buffer,
-        _tile_buffer,
+        _,
+        _,
+        _,
+        _,
     ) = ours_render_op(
         options.background_color.to(
             device=scene.center_position.device,
@@ -284,11 +297,15 @@ def _render_ours_single_camera(
     )
 
 
-def _render_radegs_single_camera(
+def render_radegs_single_camera(
     scene: GaussianScene3D,
-    camera_params: _CameraStageParams,
+    camera_params: CameraStageParams,
     options: GaussianWrappingNativeRenderOptions,
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[
+    Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor, Tensor
+]:
+    """Render one camera through the upstream RaDe-GS rasterizer variant."""
+    # Pack scene fields once, then pass them through in the upstream order.
     (
         center_positions,
         opacities,
@@ -297,13 +314,15 @@ def _render_radegs_single_camera(
         colors,
         spherical_harmonics,
         empty,
-        _empty_extra,
-    ) = _scene_stage_inputs(scene, options)
+        _,
+    ) = scene_stage_inputs(scene, options)
+    # RaDe-GS exposes extra coordinate buffers that are not part of Ember's
+    # render contract, so they stay local to this adapter.
     (
-        _rendered_count,
+        _,
         color,
-        _coord,
-        _median_coord,
+        _,
+        _,
         alpha,
         normal,
         expected_depth,
@@ -312,9 +331,9 @@ def _render_radegs_single_camera(
         depth_sum,
         depth_square,
         radii,
-        _geom_buffer,
-        _binning_buffer,
-        _image_buffer,
+        _,
+        _,
+        _,
     ) = radegs_render_op(
         options.background_color.to(
             device=scene.center_position.device,
@@ -355,17 +374,19 @@ def _render_radegs_single_camera(
     )
 
 
-def _chw_to_hwc(image: Tensor) -> Tensor:
+def channels_first_to_last(image: Tensor) -> Tensor:
+    """Convert a CHW image tensor to HWC layout."""
     return image.permute(1, 2, 0).contiguous()
 
 
-def _apply_loss_mask(loss: Tensor, mask: Tensor | None) -> Tensor:
+def apply_loss_mask(loss: Tensor, mask: Tensor | None) -> Tensor:
+    """Apply an optional loss mask on the loss tensor's device and dtype."""
     if mask is None:
         return loss
     return loss * mask.to(device=loss.device, dtype=loss.dtype)
 
 
-def _compaction_color_l2(
+def compaction_color_l2(
     *,
     color: Tensor,
     alpha: Tensor,
@@ -374,9 +395,10 @@ def _compaction_color_l2(
     background: Tensor,
     mask: Tensor | None,
 ) -> Tensor:
+    """Compute an unreduced upstream-style color compaction L2 map."""
     alpha_map = alpha.squeeze(0).contiguous()
     target = target_rgb.to(device=color.device, dtype=color.dtype)
-    foreground_color = _chw_to_hwc(color) - (
+    foreground_color = channels_first_to_last(color) - (
         (1.0 - alpha_map)[..., None] * background
     )
     loss = (
@@ -384,10 +406,10 @@ def _compaction_color_l2(
         - 2.0 * (target * foreground_color).sum(dim=-1)
         + target.square().sum(dim=-1) * alpha_map
     )
-    return _apply_loss_mask(loss.clamp_min(0.0), mask)
+    return apply_loss_mask(loss.clamp_min(0.0), mask)
 
 
-def _compaction_depth_l2(
+def compaction_depth_l2(
     *,
     alpha: Tensor,
     depth_sum: Tensor,
@@ -395,6 +417,7 @@ def _compaction_depth_l2(
     target_depth: Tensor,
     mask: Tensor | None,
 ) -> Tensor:
+    """Compute an unreduced upstream-style depth compaction L2 map."""
     alpha_map = alpha.squeeze(0).contiguous()
     target = target_depth.to(device=depth_sum.device, dtype=depth_sum.dtype)
     loss = (
@@ -402,7 +425,7 @@ def _compaction_depth_l2(
         - 2.0 * target * depth_sum.squeeze(0)
         + target.square() * alpha_map
     )
-    return _apply_loss_mask(loss.clamp_min(0.0), mask)
+    return apply_loss_mask(loss.clamp_min(0.0), mask)
 
 
 @beartype
@@ -435,7 +458,7 @@ def render_gaussian_wrapping_native(
             "intersection transforms."
         )
     resolved_options = options or GaussianWrappingNativeRenderOptions()
-    _validate_inputs(scene, camera)
+    validate_inputs(scene, camera)
 
     renders: list[Tensor] = []
     alphas: list[Tensor] = []
@@ -444,7 +467,7 @@ def render_gaussian_wrapping_native(
     median_depths: list[Tensor] = []
     radii: list[Tensor] = []
     for camera_index in range(camera.cam_to_world.shape[0]):
-        camera_params = _camera_stage_params(
+        camera_params = camera_stage_params(
             camera,
             camera_index,
             resolved_options,
@@ -455,11 +478,11 @@ def render_gaussian_wrapping_native(
                 alpha,
                 normal,
                 median_depth,
-                _color_square,
-                _depth_sum,
-                _depth_square,
+                _,
+                _,
+                _,
                 camera_radii,
-            ) = _render_ours_single_camera(
+            ) = render_ours_single_camera(
                 scene, camera_params, resolved_options
             )
             expected_depth = median_depth
@@ -470,18 +493,18 @@ def render_gaussian_wrapping_native(
                 normal,
                 expected_depth,
                 median_depth,
-                _color_square,
-                _depth_sum,
-                _depth_square,
+                _,
+                _,
+                _,
                 camera_radii,
-            ) = _render_radegs_single_camera(
+            ) = render_radegs_single_camera(
                 scene,
                 camera_params,
                 resolved_options,
             )
-        renders.append(_chw_to_hwc(color).clamp(0.0, 1.0))
+        renders.append(channels_first_to_last(color).clamp(0.0, 1.0))
         alphas.append(alpha.squeeze(0).contiguous())
-        normals.append(_chw_to_hwc(normal))
+        normals.append(channels_first_to_last(normal))
         expected_depths.append(expected_depth.squeeze(0).contiguous())
         median_depths.append(median_depth.squeeze(0).contiguous())
         radii.append(camera_radii.contiguous())
@@ -516,11 +539,9 @@ def render_gaussian_wrapping_compaction_losses(
 ) -> RayCompactionLossMaps:
     """Render unreduced per-pixel color/depth compaction loss maps."""
     resolved_options = options or GaussianWrappingNativeRenderOptions()
-    _validate_inputs(scene, camera)
+    validate_inputs(scene, camera)
 
-    color_losses: list[Tensor] | None = (
-        [] if targets.rgb is not None else None
-    )
+    color_losses: list[Tensor] | None = [] if targets.rgb is not None else None
     depth_losses: list[Tensor] | None = (
         [] if targets.depth is not None else None
     )
@@ -531,7 +552,7 @@ def render_gaussian_wrapping_compaction_losses(
     ).contiguous()
 
     for camera_index in range(camera.cam_to_world.shape[0]):
-        camera_params = _camera_stage_params(
+        camera_params = camera_stage_params(
             camera,
             camera_index,
             resolved_options,
@@ -540,13 +561,13 @@ def render_gaussian_wrapping_compaction_losses(
             (
                 color,
                 alpha,
-                _normal,
-                _median_depth,
+                _,
+                _,
                 color_square,
                 depth_sum,
                 depth_square,
-                _camera_radii,
-            ) = _render_ours_single_camera(
+                _,
+            ) = render_ours_single_camera(
                 scene,
                 camera_params,
                 resolved_options,
@@ -555,14 +576,14 @@ def render_gaussian_wrapping_compaction_losses(
             (
                 color,
                 alpha,
-                _normal,
-                _expected_depth,
-                _median_depth,
+                _,
+                _,
+                _,
                 color_square,
                 depth_sum,
                 depth_square,
-                _camera_radii,
-            ) = _render_radegs_single_camera(
+                _,
+            ) = render_radegs_single_camera(
                 scene,
                 camera_params,
                 resolved_options,
@@ -580,7 +601,7 @@ def render_gaussian_wrapping_compaction_losses(
         alphas.append(alpha_map)
         if color_losses is not None and targets.rgb is not None:
             color_losses.append(
-                _compaction_color_l2(
+                compaction_color_l2(
                     color=color,
                     alpha=alpha,
                     color_square=color_square,
@@ -591,7 +612,7 @@ def render_gaussian_wrapping_compaction_losses(
             )
         if depth_losses is not None and targets.depth is not None:
             depth_losses.append(
-                _compaction_depth_l2(
+                compaction_depth_l2(
                     alpha=alpha,
                     depth_sum=depth_sum,
                     depth_square=depth_square,
@@ -619,9 +640,10 @@ def render_gaussian_wrapping_compaction_losses(
     )
 
 
-def _quaternion_to_rotation_matrix(
+def quaternion_to_rotation_matrix(
     quaternion_orientation: Float[Tensor, "num_splats 4"],
 ) -> Float[Tensor, "num_splats 3 3"]:
+    """Convert normalized quaternions to rotation matrices."""
     quaternion = torch.nn.functional.normalize(
         quaternion_orientation,
         dim=-1,
@@ -730,7 +752,7 @@ class GaussianWrappingSurfaceProvider(WrappingSurfaceProvider):
             dtype=scene.center_position.dtype,
             device=scene.center_position.device,
         )
-        rotations = _quaternion_to_rotation_matrix(scene.quaternion_orientation)
+        rotations = quaternion_to_rotation_matrix(scene.quaternion_orientation)
         scales = torch.exp(scene.log_scales)
         local_offsets = offsets[None, :, :] * scales[:, None, :]
         rotated_offsets = torch.einsum(
@@ -781,7 +803,7 @@ class GaussianWrappingSurfaceProvider(WrappingSurfaceProvider):
         values: Tensor | None = None
         inside: Tensor | None = None
         for camera_index in range(request.camera.cam_to_world.shape[0]):
-            camera_values, camera_inside = _query_single_camera(
+            camera_values, camera_inside = query_single_camera(
                 request.scene,
                 request.camera,
                 camera_index,
@@ -807,14 +829,15 @@ class GaussianWrappingSurfaceProvider(WrappingSurfaceProvider):
         )
 
 
-def _query_single_camera(
+def query_single_camera(
     scene: GaussianScene3D,
     camera: CameraState,
     camera_index: int,
     points: Float[Tensor, " num_points 3"],
     options: GaussianWrappingNativeRenderOptions,
 ) -> tuple[Float[Tensor, " num_points"], Bool[Tensor, " num_points"]]:
-    camera_params = _camera_stage_params(camera, camera_index, options)
+    """Evaluate the wrapping field for one camera and point set."""
+    camera_params = camera_stage_params(camera, camera_index, options)
     (
         center_positions,
         opacities,
@@ -823,11 +846,11 @@ def _query_single_camera(
         colors,
         spherical_harmonics,
         empty,
-        _empty_extra,
-    ) = _scene_stage_inputs(scene, options)
+        _,
+    ) = scene_stage_inputs(scene, options)
     if options.rasterizer_mode == "ours":
         (
-            _rendered_count,
+            _,
             transmittance,
             inside,
         ) = ours_integrate_points_fwd_op(
@@ -858,16 +881,16 @@ def _query_single_camera(
         device=scene.center_position.device,
     )
     (
-        _rendered_count,
-        _color,
+        _,
+        _,
         alpha_integrated,
-        _color_integrated,
-        _point_coordinate,
+        _,
+        _,
         point_sdf,
-        _radii,
-        _geom_buffer,
-        _binning_buffer,
-        _image_buffer,
+        _,
+        _,
+        _,
+        _,
     ) = radegs_integrate_points_fwd_op(
         options.background_color.to(
             device=scene.center_position.device,
@@ -905,6 +928,6 @@ def register() -> None:
         name="faster_gs.gaussian_wrapping",
         default_options=GaussianWrappingNativeRenderOptions(),
         accepted_scene_types=(GaussianScene3D,),
-        supported_outputs=_SUPPORTED_OUTPUTS,
+        supported_outputs=SUPPORTED_OUTPUTS,
         trait_providers=(GaussianWrappingSurfaceProvider(),),
     )(render_gaussian_wrapping_native)

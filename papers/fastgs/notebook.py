@@ -3,7 +3,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="columns")
+app = marimo.App(width="medium")
 
 with app.setup:
     import json
@@ -67,7 +67,7 @@ with app.setup:
     ]
     FastGSDensificationMode = Literal["fastgs", "mcmc"]
     FastGSMetricMapBackend = Literal["eager", "compile"]
-    _COMPILED_FASTGS_L1_METRIC_MAP: Any | None = None
+    COMPILED_FASTGS_L1_METRIC_MAP: Any | None = None
     sys.modules.setdefault("papers.fastgs.notebook", sys.modules[__name__])
     ember_fastgs_adapter.register()
     ember_fastgs_native.register()
@@ -77,6 +77,8 @@ with app.setup:
 def _():
     mo.md("""
     # FastGS training
+
+    ## IO
     """)
     return
 
@@ -159,7 +161,7 @@ def _(training_viewer):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Config definition
+    ## Method and config
     """)
     return
 
@@ -704,7 +706,7 @@ class FastGSExperimentConfig(FastGSConfigBase):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Function definitions
+    ## Training assembly
     """)
     return
 
@@ -945,6 +947,7 @@ class FastGSScheduledAdam(torch.optim.Adam):
         self._zero_grad_on_next_call = False
 
     def step(self, closure: Any = None) -> Any:
+        """Apply an optimizer step when the FastGS cadence allows it."""
         self.fastgs_iteration += 1
         if not self.should_step(self.fastgs_iteration):
             self._zero_grad_on_next_call = False
@@ -1091,7 +1094,7 @@ def rgb_l1_ssim_loss(
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training setup
+    ## IO wiring and benchmarks
     """)
     return
 
@@ -1178,10 +1181,10 @@ def benchmark_fastgs_dataloader(
     device = torch.device(training_config.runtime.device)
 
     def move_batch_to_device(batch: Any) -> Any:
-        moved = batch.to(device, non_blocking=device.type == "cuda")
+        device_batch = batch.to(device, non_blocking=device.type == "cuda")
         if device.type == "cuda":
             torch.cuda.synchronize(device)
-        return moved
+        return device_batch
 
     return benchmark_dataloader(
         dataloader,
@@ -1223,10 +1226,10 @@ def _(dataloader_benchmark_result):
     return (dataloader_benchmark_view,)
 
 
-@app.cell(column=1, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Training
+    ## Execution
     """)
     return
 
@@ -1291,11 +1294,11 @@ def _(
     train_button,
     training_preparation_handle,
 ):
-    should_prepare = (
+    should_prepare_training_inputs = (
         is_script_mode or bool(prepare_button.value) or bool(train_button.value)
     )
     if (
-        should_prepare
+        should_prepare_training_inputs
         and current_config is not None
         and training_preparation_handle is not None
     ):
@@ -1305,20 +1308,22 @@ def _(
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
     )
     training_preparation_status = (
-        ember_splatting.render_training_preparation_status(_snapshot)
+        ember_splatting.render_training_preparation_status(
+            preparation_status_snapshot
+        )
     )
     return (training_preparation_status,)
 
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
@@ -1329,7 +1334,9 @@ def _(ember_splatting, training_preparation_snapshot):
         frame_dataset,
         frame_dataset_error,
         frame_view_catalog,
-    ) = ember_splatting.training_preparation_outputs(_snapshot)
+    ) = ember_splatting.training_preparation_outputs(
+        preparation_outputs_snapshot
+    )
     return (
         scene_load_error,
         scene_record,
@@ -1407,7 +1414,7 @@ def _(
     training_config,
     training_viewer_handle,
 ):
-    should_train = bool(train_button.value)
+    should_start_training = bool(train_button.value)
     if (
         is_script_mode
         and current_config is not None
@@ -1422,7 +1429,7 @@ def _(
     else:
         training_result = None
         if (
-            should_train
+            should_start_training
             and frame_dataset is not None
             and training_config is not None
             and training_viewer_handle is not None
@@ -1462,17 +1469,19 @@ def _(training_result, training_status_refresh, training_viewer_handle):
                 if snapshot.max_steps is not None
                 else str(snapshot.step)
             )
-            metric_parts = [
+            metric_text_parts = [
                 f"{name}={value:.6g}"
                 for name, value in sorted(snapshot.latest_metrics.items())
             ]
             if snapshot.primitive_count is not None:
-                metric_parts.append(f"primitives={snapshot.primitive_count:,}")
+                metric_text_parts.append(
+                    f"primitives={snapshot.primitive_count:,}"
+                )
             if snapshot.iterations_per_second is not None:
-                metric_parts.append(
+                metric_text_parts.append(
                     f"it/s={snapshot.iterations_per_second:.2f}"
                 )
-            metric_text = " | ".join(metric_parts)
+            metric_text = " | ".join(metric_text_parts)
             status_text = (
                 "Stopping" if snapshot.status == "stopping" else "Training"
             )
@@ -1514,10 +1523,10 @@ def _(training_result, training_status_refresh, training_viewer_handle):
     return (training_result_view,)
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Densification
+    ## Densification implementation
     """)
     return
 
@@ -1557,7 +1566,7 @@ class HasFastGSDensificationInfo(Protocol):
 
 @app.cell
 def _():
-    class _FastGSDensificationCellLocal(BaseDensificationMethod):
+    class FastGSNotebookDensification(BaseDensificationMethod):
         """Notebook-local FastGS adaptive density control."""
 
         expected_scene_families = ("gaussian",)
@@ -2054,6 +2063,7 @@ def _():
             pruning_sum = torch.zeros_like(importance_sum)
             if not probe_views:
                 return importance_sum, pruning_sum
+            # Probe renders drive the paper view-consistency scores.
             for sample in probe_views:
                 probe_output = context.runtime.render_raw(
                     context.state.model,
@@ -2104,6 +2114,7 @@ def _():
                 self.family_ops.prune(~prune_mask)
 
         def _normalize_score(self, score: Tensor) -> Tensor:
+            """Normalize a FastGS score tensor before thresholding."""
             return fastgs_normalize_score(score)
 
         def _metric_map(
@@ -2111,6 +2122,7 @@ def _():
             predicted: Tensor,
             target: Tensor,
         ) -> Tensor:
+            """Compute the metric map used by FastGS densification."""
             if self.metric_map_backend == "compile":
                 try:
                     return compiled_fastgs_l1_metric_map(
@@ -2135,6 +2147,7 @@ def _():
             predicted: Tensor,
             target: Tensor,
         ) -> Tensor:
+            """Compute the FastGS L1-plus-SSIM probe loss."""
             l1_loss = (predicted - target).abs().mean()
             from ember_splatting_training.losses import ssim_score
 
@@ -2150,6 +2163,7 @@ def _():
             name: str,
             value: float,
         ) -> None:
+            """Publish a densification metric to the training diagnostics."""
             diagnostics = getattr(context.state, "diagnostics", None)
             if not isinstance(diagnostics, dict):
                 return
@@ -2223,10 +2237,10 @@ class FastGSFinalCleanup(BaseDensificationMethod):
         self.family_ops.reorder(morton_order(scene.center_position))
 
 
-@app.cell(column=3, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Support
+    ## Utilities
     """)
     return
 

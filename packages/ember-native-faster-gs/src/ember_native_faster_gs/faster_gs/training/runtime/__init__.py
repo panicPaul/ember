@@ -122,6 +122,7 @@ class FusedAdam(torch.optim.Adam):
     """FasterGS fused Adam optimizer."""
 
     def __init__(self, params: object, lr: float, eps: float) -> None:
+        """Create a fused Adam optimizer for one-parameter groups."""
         super().__init__(params=params, lr=lr, eps=eps)
 
     @torch.no_grad()

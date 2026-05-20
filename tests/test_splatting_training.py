@@ -76,6 +76,7 @@ from ember_splatting_training.training_viewer import (
     create_training_preparation,
     create_training_run,
     create_training_viewer,
+    ssim_error_map,
     training_preparation_outputs,
     viridis_error_map,
 )
@@ -1125,8 +1126,10 @@ def test_splatting_training_package_exports() -> None:
     assert hasattr(splatting_training, "create_training_view_inspector")
     assert hasattr(splatting_training, "create_training_viewer")
     assert hasattr(splatting_training, "render_training_preparation_status")
+    assert hasattr(splatting_training, "ssim_error_map")
     assert hasattr(splatting_training, "training_inspector_spinner")
     assert hasattr(splatting_training, "training_preparation_outputs")
+    assert hasattr(splatting_training, "training_view_render_mode_options")
 
 
 def test_training_viewer_default_snapshot_cadence_is_100() -> None:
@@ -1136,7 +1139,8 @@ def test_training_viewer_default_snapshot_cadence_is_100() -> None:
 def test_training_view_inspector_config_validates_l1_range() -> None:
     config = TrainingViewInspectorConfig()
 
-    assert config.l1_range == (0.0, 0.25)
+    assert config.l1_range == (0.0, 0.2)
+    assert config.ssim_range == (0.0, 0.2)
     with pytest.raises(ValueError, match="l1_range must lie"):
         TrainingViewInspectorConfig(l1_range=(0.0, 2.0))
 
@@ -1169,14 +1173,22 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
     show_validation = _NoValueElement("show-validation", 0, 0)
     training = _NoValueElement("training", ["Training"], "train:0:0")
     show_training = _NoValueElement("show-training", 0, 0)
-    l1_range = _NoValueElement("l1-range", [0.0, 0.25], [0.0, 0.25])
+    render_mode = _NoValueElement("render-mode", ["Color"], "color")
+    l1_range = _NoValueElement("l1-range", [0.0, 0.2], [0.0, 0.2])
+    ssim_range = _NoValueElement("ssim-range", [0.0, 0.2], [0.0, 0.2])
+    alpha_range = _NoValueElement("alpha-range", [0.0, 1.0], [0.0, 1.0])
+    depth_range = _NoValueElement("depth-range", [0.0, 100.0], [0.0, 100.0])
     controls = training_viewer_module.TrainingViewInspectorControls(
         view=object(),
         validation_view_selector=validation,
         show_validation_view_button=show_validation,
         training_view_selector=training,
         show_training_view_button=show_training,
+        render_mode_selector=render_mode,
         l1_range_slider=l1_range,
+        ssim_range_slider=ssim_range,
+        alpha_range_slider=alpha_range,
+        depth_range_slider=depth_range,
     )
     inspector = training_viewer_module.TrainingViewInspector(
         config=TrainingViewInspectorConfig(),
@@ -1186,14 +1198,22 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
             training_viewer_module._INSPECTOR_SHOW_VALIDATION_KEY: show_validation,
             training_viewer_module._INSPECTOR_TRAINING_VIEW_KEY: training,
             training_viewer_module._INSPECTOR_SHOW_TRAINING_KEY: show_training,
+            training_viewer_module._INSPECTOR_RENDER_MODE_KEY: render_mode,
             training_viewer_module._INSPECTOR_L1_RANGE_KEY: l1_range,
+            training_viewer_module._INSPECTOR_SSIM_RANGE_KEY: ssim_range,
+            training_viewer_module._INSPECTOR_ALPHA_RANGE_KEY: alpha_range,
+            training_viewer_module._INSPECTOR_DEPTH_RANGE_KEY: depth_range,
         },
     )
 
     catalog = SimpleNamespace(view_ref_by_key=lambda key: key)
 
     assert inspector.selected_view_ref(catalog) == "val:0:0"
-    assert inspector.l1_value_range() == (0.0, 0.25)
+    assert inspector.l1_value_range() == (0.0, 0.2)
+    assert inspector.ssim_value_range() == (0.0, 0.2)
+    assert inspector.alpha_value_range() == (0.0, 1.0)
+    assert inspector.depth_value_range() == (0.0, 100.0)
+    assert inspector.render_mode() == "color"
     assert validation.registered_parent is inspector
 
     inspector._convert_value(
@@ -1203,6 +1223,44 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
     )
 
     assert inspector.selected_view_ref(catalog) == "train:0:0"
+
+
+def test_training_view_render_modes_follow_config_outputs() -> None:
+    if "unit_test_preview_modes" not in BACKEND_REGISTRY:
+
+        @register_backend(
+            name="unit_test_preview_modes",
+            default_options=RenderOptions(),
+            accepted_scene_types=(GaussianScene3D,),
+            supported_outputs=frozenset({"alpha", "depth", "normals"}),
+        )
+        def render_preview_modes_backend(
+            scene: GaussianScene3D,
+            camera: CameraState,
+            **kwargs: object,
+        ) -> RenderOutput:
+            del scene, camera, kwargs
+            return RenderOutput(render=torch.zeros((1, 1, 1, 3)))
+
+    config = SimpleNamespace(
+        render=SimpleNamespace(
+            backend="unit_test_preview_modes",
+            return_alpha=True,
+            return_depth=True,
+            return_normals=True,
+        )
+    )
+
+    modes = training_viewer_module.training_view_render_modes_for_config(config)
+    options = training_viewer_module.training_view_render_mode_options(config)
+
+    assert modes == ("color", "alpha", "depth", "normals")
+    assert options == {
+        "Color": "color",
+        "Alpha": "alpha",
+        "Depth": "depth",
+        "Normals": "normals",
+    }
 
 
 def test_training_preparation_status_uses_marimo_spinner() -> None:
@@ -1965,7 +2023,7 @@ class _NumPrimitiveScene(Scene):
     def scene_family(self):
         return GAUSSIAN
 
-    def _validate(self) -> None:
+    def validate(self) -> None:
         pass
 
 
@@ -2374,8 +2432,11 @@ def test_training_view_inspection_uses_one_render_for_builtin_and_custom_maps() 
     assert cached is inspection
     assert inspection.available is True
     assert inspection.render_step == 5
+    assert inspection.render_mode == "color"
     assert inspection.target_image.shape == (2, 2, 3)
     assert inspection.prediction_image.dtype == torch.uint8
+    assert inspection.preview_image.dtype == torch.uint8
+    assert inspection.ssim_error.shape == (0, 0)
     torch.testing.assert_close(inspection.l1_error, torch.ones((2, 2)))
     assert inspection.l1_mean == pytest.approx(1.0)
     assert [result.key for result in inspection.maps] == [
@@ -2384,6 +2445,143 @@ def test_training_view_inspection_uses_one_render_for_builtin_and_custom_maps() 
     ]
     assert inspection.maps[0].mean_value == pytest.approx(2.0)
     assert inspection.maps[1].values is None
+
+
+def test_training_view_inspection_detects_outputs_and_stays_no_grad() -> None:
+    scene = GaussianScene3D(
+        center_position=torch.zeros((1, 3)),
+        log_scales=torch.zeros((1, 3)),
+        quaternion_orientation=torch.zeros((1, 4)),
+        logit_opacity=torch.zeros((1,)),
+        feature=torch.ones((1, 1, 3)),
+        sh_degree=0,
+    )
+    state = TrainState(
+        model=InitializedModel(
+            scene=scene,
+            modules={},
+            parameters={},
+        ),
+        step=7,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    sample = PreparedFrameSample(
+        frame=DatasetFrame(
+            frame_id="frame_0",
+            sensor_id="camera",
+            camera_index=0,
+            width=16,
+            height=16,
+            timestamp_us=0,
+        ),
+        image=torch.zeros((16, 16, 3), dtype=torch.float32),
+        camera=_viewer_test_camera(16, 16),
+    )
+    render_count = 0
+
+    def render_once(model: InitializedModel, camera: CameraState) -> object:
+        nonlocal render_count
+        del model, camera
+        render_count += 1
+        assert not torch.is_grad_enabled()
+        return SimpleNamespace(
+            render=torch.full((1, 16, 16, 3), 0.5, dtype=torch.float32),
+            alphas=torch.full((1, 16, 16), 0.25, dtype=torch.float32),
+            depth=torch.linspace(
+                1.0, 4.0, 16 * 16, dtype=torch.float32
+            ).reshape(1, 16, 16),
+            normals=torch.zeros((1, 16, 16, 3), dtype=torch.float32),
+        )
+
+    def no_grad_map(context):
+        assert not torch.is_grad_enabled()
+        return context.l1_error
+
+    handle = TrainingViewerHandle(config=TrainingViewerConfig())
+    handle._render_fn = render_once
+    handle.update_render_snapshot(state)
+
+    inspection = handle.inspect_view(
+        sample,
+        value_range=(0.0, 1.0),
+        ssim_value_range=(0.0, 1.0),
+        alpha_value_range=(0.0, 1.0),
+        depth_value_range=(0.0, 100.0),
+        render_mode="depth",
+        map_specs=(TrainingViewMapSpec(key="l1", label="L1", fn=no_grad_map),),
+    )
+
+    assert render_count == 1
+    assert inspection.render_mode == "depth"
+    assert inspection.available_render_modes == (
+        "color",
+        "alpha",
+        "depth",
+        "normals",
+    )
+    assert inspection.preview_label == "Depth"
+    assert inspection.preview_image.shape == (16, 16, 3)
+    assert inspection.preview_mean_value == pytest.approx(2.5)
+    assert inspection.ssim_error.shape == (6, 6)
+    assert inspection.ssim_error.requires_grad is False
+    assert inspection.l1_error.requires_grad is False
+    torch.testing.assert_close(
+        inspection.l1_error,
+        torch.full((16, 16), 0.5),
+    )
+    assert inspection.maps[0].values is not None
+
+
+def test_training_view_inspection_falls_back_for_unavailable_mode() -> None:
+    scene = GaussianScene3D(
+        center_position=torch.zeros((1, 3)),
+        log_scales=torch.zeros((1, 3)),
+        quaternion_orientation=torch.zeros((1, 4)),
+        logit_opacity=torch.zeros((1,)),
+        feature=torch.ones((1, 1, 3)),
+        sh_degree=0,
+    )
+    state = TrainState(
+        model=InitializedModel(scene=scene, modules={}, parameters={}),
+        step=3,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    sample = PreparedFrameSample(
+        frame=DatasetFrame(
+            frame_id="frame_0",
+            sensor_id="camera",
+            camera_index=0,
+            width=16,
+            height=16,
+            timestamp_us=0,
+        ),
+        image=torch.zeros((16, 16, 3), dtype=torch.float32),
+        camera=_viewer_test_camera(16, 16),
+    )
+    handle = TrainingViewerHandle(config=TrainingViewerConfig())
+    handle._render_fn = lambda model, camera: torch.zeros((16, 16, 3))
+    handle.update_render_snapshot(state)
+
+    inspection = handle.inspect_view(sample, render_mode="depth")
+
+    assert inspection.available_render_modes == ("color",)
+    assert inspection.render_mode == "color"
+    assert inspection.preview_label == "Color"
+
+
+def test_ssim_error_map_uses_valid_window() -> None:
+    prediction = torch.zeros((16, 16, 3), dtype=torch.float32)
+    target = torch.zeros((16, 16, 3), dtype=torch.float32)
+    target[5:11, 5:11] = 1.0
+
+    error = ssim_error_map(prediction, target)
+
+    assert error.shape == (6, 6)
+    assert error.min() >= 0.0
+    assert error.max() <= 1.0
+    assert error.max() > 0.0
 
 
 def test_viridis_error_map_clips_to_explicit_range() -> None:

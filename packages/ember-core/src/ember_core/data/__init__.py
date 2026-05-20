@@ -83,7 +83,8 @@ from ember_core.data.views import (
 SceneSourceFormat = Literal["colmap", "must3r", "ncore"]
 
 
-def _infer_scene_source_format(path: Path) -> SceneSourceFormat:
+def infer_scene_source_format(path: Path) -> SceneSourceFormat:
+    """Infer the scene source format from a raw path."""
     if path.is_dir() and (
         (path / "sparse").exists()
         or (path / "cameras.bin").exists()
@@ -138,7 +139,8 @@ def adjust_scene_record_horizon(
     return _adjust_scene_record_horizon(scene_record, adjustment)
 
 
-def _load_scene_record_from_config(config: SceneLoadConfig) -> SceneRecord:
+def load_scene_record_from_config(config: SceneLoadConfig) -> SceneRecord:
+    """Load a scene record from a declarative scene-load config."""
     if isinstance(config, ColmapSceneConfig):
         scene_record = load_colmap_scene_record(
             config.path,
@@ -177,10 +179,10 @@ def load_scene_record(
 ) -> SceneRecord:
     """Load a canonical scene record from config or a raw path."""
     if isinstance(path_or_config, SceneLoadConfig):
-        return _load_scene_record_from_config(path_or_config)
+        return load_scene_record_from_config(path_or_config)
 
     resolved_path = Path(path_or_config)
-    resolved_format = format or _infer_scene_source_format(resolved_path)
+    resolved_format = format or infer_scene_source_format(resolved_path)
     if resolved_format == "colmap":
         return load_colmap_scene_record(resolved_path, **kwargs)
     if resolved_format == "must3r":

@@ -13,11 +13,13 @@ from ember_native_faster_gs.gaussian_wrapping.runtime._extension import (
 )
 
 
-def _requires_grad(*tensors: Tensor) -> bool:
+def requires_grad(*tensors: Tensor) -> bool:
+    """Return whether any stage input needs gradients."""
     return any(tensor.requires_grad for tensor in tensors)
 
 
-def _zero_like_if_none(grad: Tensor | None, reference: Tensor) -> Tensor:
+def zero_like_if_none(grad: Tensor | None, reference: Tensor) -> Tensor:
+    """Replace an optional gradient with a zero tensor matching a reference."""
     if grad is None:
         return torch.zeros_like(reference)
     return grad
@@ -149,7 +151,7 @@ def ours_render_fwd_op(
 
 
 @ours_render_fwd_op.register_fake
-def _ours_render_fwd_fake(
+def ours_render_fwd_fake(
     background: Tensor,
     means3D: Tensor,
     colors: Tensor,
@@ -176,6 +178,7 @@ def _ours_render_fwd_fake(
     require_depth: bool,
     debug: bool,
 ) -> OursRenderForwardOutput:
+    """Return fake tensors for tracing the `ours` render forward stage."""
     del (
         background,
         colors,
@@ -305,7 +308,7 @@ def ours_render_bwd_op(
 
 
 @ours_render_bwd_op.register_fake
-def _ours_render_bwd_fake(
+def ours_render_bwd_fake(
     background: Tensor,
     means3D: Tensor,
     colors: Tensor,
@@ -345,6 +348,7 @@ def _ours_render_bwd_fake(
     require_depth: bool,
     debug: bool,
 ) -> OursRenderBackwardOutput:
+    """Return fake tensors for tracing the `ours` render backward stage."""
     del (
         background,
         opacity,
@@ -391,12 +395,13 @@ def _ours_render_bwd_fake(
     )
 
 
-def _ours_render_setup_context(
+def ours_render_setup_context(
     ctx: Any,
     inputs: tuple[Any, ...],
     output: OursRenderForwardOutput,
 ) -> None:
-    if not _requires_grad(*inputs[:11]):
+    """Save `ours` render tensors required by the autograd backward pass."""
+    if not requires_grad(*inputs[:11]):
         ctx.has_context = False
         return
     ctx.has_context = True
@@ -435,7 +440,7 @@ def _ours_render_setup_context(
     ctx.debug = inputs[24]
 
 
-def _ours_render_backward(
+def ours_render_backward(
     ctx: Any,
     grad_rendered_count: Tensor,
     grad_color: Tensor,
@@ -448,6 +453,7 @@ def _ours_render_backward(
     grad_radii: Tensor,
     *grad_buffers: Tensor,
 ) -> tuple[Tensor | None, ...]:
+    """Run the autograd backward bridge for the `ours` render stage."""
     del grad_rendered_count, grad_radii, grad_buffers
     if not ctx.has_context:
         return (None,) * 25
@@ -476,11 +482,11 @@ def _ours_render_backward(
         image_buffer,
         tile_buffer,
     ) = ctx.saved_tensors
-    grad_color_square = _zero_like_if_none(grad_color_square, alpha)
-    grad_depth = _zero_like_if_none(grad_depth, alpha)
-    grad_depth_square = _zero_like_if_none(grad_depth_square, alpha)
+    grad_color_square = zero_like_if_none(grad_color_square, alpha)
+    grad_depth = zero_like_if_none(grad_depth, alpha)
+    grad_depth_square = zero_like_if_none(grad_depth_square, alpha)
     (
-        _grad_means2D,
+        _,
         grad_colors,
         grad_opacity,
         grad_means3D,
@@ -605,10 +611,10 @@ def ours_render_op(
     )
 
 
-ours_render_op.register_fake(_ours_render_fwd_fake)
+ours_render_op.register_fake(ours_render_fwd_fake)
 ours_render_op.register_autograd(
-    _ours_render_backward,
-    setup_context=_ours_render_setup_context,
+    ours_render_backward,
+    setup_context=ours_render_setup_context,
 )
 
 
@@ -660,7 +666,7 @@ def ours_integrate_points_fwd_op(
 
 
 @ours_integrate_points_fwd_op.register_fake
-def _ours_integrate_points_fwd_fake(
+def ours_integrate_points_fwd_fake(
     points3D: Tensor,
     means3D: Tensor,
     opacity: Tensor,
@@ -680,6 +686,7 @@ def _ours_integrate_points_fwd_fake(
     prefiltered: bool,
     debug: bool,
 ) -> tuple[Tensor, Tensor, Tensor]:
+    """Return fake tensors for tracing the `ours` point integration stage."""
     del (
         opacity,
         scales,
@@ -754,7 +761,7 @@ def ours_sdf_fwd_op(
 
 
 @ours_sdf_fwd_op.register_fake
-def _ours_sdf_fwd_fake(
+def ours_sdf_fwd_fake(
     points3D: Tensor,
     means3D: Tensor,
     opacity: Tensor,
@@ -774,6 +781,7 @@ def _ours_sdf_fwd_fake(
     prefiltered: bool,
     debug: bool,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """Return fake tensors for tracing the `ours` SDF stage."""
     del (
         opacity,
         scales,
@@ -861,7 +869,7 @@ def radegs_render_fwd_op(
 
 
 @radegs_render_fwd_op.register_fake
-def _radegs_render_fwd_fake(
+def radegs_render_fwd_fake(
     background: Tensor,
     means3D: Tensor,
     colors: Tensor,
@@ -885,6 +893,7 @@ def _radegs_render_fwd_fake(
     require_depth: bool,
     debug: bool,
 ) -> RadegsRenderForwardOutput:
+    """Return fake tensors for tracing the RaDe-GS render forward stage."""
     del (
         background,
         colors,
@@ -1009,7 +1018,7 @@ def radegs_render_bwd_op(
 
 
 @radegs_render_bwd_op.register_fake
-def _radegs_render_bwd_fake(
+def radegs_render_bwd_fake(
     background: Tensor,
     means3D: Tensor,
     radii: Tensor,
@@ -1046,6 +1055,7 @@ def _radegs_render_bwd_fake(
     require_depth: bool,
     debug: bool,
 ) -> RadegsRenderBackwardOutput:
+    """Return fake tensors for tracing the RaDe-GS render backward stage."""
     del (
         background,
         radii,
@@ -1096,12 +1106,13 @@ def _radegs_render_bwd_fake(
     )
 
 
-def _radegs_render_setup_context(
+def radegs_render_setup_context(
     ctx: Any,
     inputs: tuple[Any, ...],
     output: RadegsRenderForwardOutput,
 ) -> None:
-    if not _requires_grad(
+    """Save RaDe-GS render tensors required by the autograd backward pass."""
+    if not requires_grad(
         inputs[1],
         inputs[2],
         inputs[3],
@@ -1142,7 +1153,7 @@ def _radegs_render_setup_context(
     ctx.debug = inputs[21]
 
 
-def _radegs_render_backward(
+def radegs_render_backward(
     ctx: Any,
     grad_rendered_count: Tensor,
     grad_color: Tensor,
@@ -1158,6 +1169,7 @@ def _radegs_render_backward(
     grad_radii: Tensor,
     *grad_buffers: Tensor,
 ) -> tuple[Tensor | None, ...]:
+    """Run the autograd backward bridge for the RaDe-GS render stage."""
     del grad_rendered_count, grad_radii, grad_buffers
     if not ctx.has_context:
         return (None,) * 22
@@ -1180,11 +1192,11 @@ def _radegs_render_backward(
         image_buffer,
         alpha,
     ) = ctx.saved_tensors
-    grad_color_square = _zero_like_if_none(grad_color_square, alpha)
-    grad_depth_sum = _zero_like_if_none(grad_depth_sum, alpha)
-    grad_depth_square = _zero_like_if_none(grad_depth_square, alpha)
+    grad_color_square = zero_like_if_none(grad_color_square, alpha)
+    grad_depth_sum = zero_like_if_none(grad_depth_sum, alpha)
+    grad_depth_square = zero_like_if_none(grad_depth_square, alpha)
     (
-        _grad_means2D,
+        _,
         grad_colors,
         grad_opacity,
         grad_means3D,
@@ -1302,10 +1314,10 @@ def radegs_render_op(
     )
 
 
-radegs_render_op.register_fake(_radegs_render_fwd_fake)
+radegs_render_op.register_fake(radegs_render_fwd_fake)
 radegs_render_op.register_autograd(
-    _radegs_render_backward,
-    setup_context=_radegs_render_setup_context,
+    radegs_render_backward,
+    setup_context=radegs_render_setup_context,
 )
 
 
@@ -1378,7 +1390,7 @@ def radegs_integrate_points_fwd_op(
 
 
 @radegs_integrate_points_fwd_op.register_fake
-def _radegs_integrate_points_fwd_fake(
+def radegs_integrate_points_fwd_fake(
     background: Tensor,
     points3D: Tensor,
     means3D: Tensor,
@@ -1414,6 +1426,7 @@ def _radegs_integrate_points_fwd_fake(
     Tensor,
     Tensor,
 ]:
+    """Return fake tensors for tracing the RaDe-GS point integration stage."""
     del (
         background,
         colors,

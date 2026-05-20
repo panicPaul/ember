@@ -3,7 +3,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="columns")
+app = marimo.App(width="medium")
 
 with app.setup:
     import json
@@ -43,6 +43,8 @@ with app.setup:
 def _():
     mo.md("""
     # Neural Harmonic Textures
+
+    ## IO
     """)
     return
 
@@ -50,7 +52,7 @@ def _():
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Configuration
+    ### Configuration
     """)
     return
 
@@ -70,7 +72,7 @@ def _(config_gui):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training controls
+    ### Training controls
     """)
     return
 
@@ -90,7 +92,7 @@ def _(training_preparation_status):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training output
+    ### Results and viewer
     """)
     return
 
@@ -107,10 +109,10 @@ def _(training_viewer):
     return
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Configuration model
+    ## Method and config
     """)
     return
 
@@ -1150,7 +1152,7 @@ def nht_rgb_l1_dssim_loss(
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training setup
+    ## Execution
     """)
     return
 
@@ -1580,11 +1582,11 @@ def _(
     train_button,
     training_preparation_handle,
 ):
-    should_prepare = (
+    should_prepare_training_inputs = (
         is_script_mode or bool(prepare_button.value) or bool(train_button.value)
     )
     if (
-        should_prepare
+        should_prepare_training_inputs
         and current_config is not None
         and training_preparation_handle is not None
     ):
@@ -1594,20 +1596,22 @@ def _(
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
     )
     training_preparation_status = (
-        ember_splatting.render_training_preparation_status(_snapshot)
+        ember_splatting.render_training_preparation_status(
+            preparation_status_snapshot
+        )
     )
     return (training_preparation_status,)
 
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
@@ -1618,7 +1622,9 @@ def _(ember_splatting, training_preparation_snapshot):
         frame_dataset,
         frame_dataset_error,
         frame_view_catalog,
-    ) = ember_splatting.training_preparation_outputs(_snapshot)
+    ) = ember_splatting.training_preparation_outputs(
+        preparation_outputs_snapshot
+    )
     return (
         scene_load_error,
         scene_record,
@@ -1708,7 +1714,7 @@ def _(
     training_config,
     training_viewer_handle,
 ):
-    should_train = bool(train_button.value)
+    should_start_training = bool(train_button.value)
     if (
         is_script_mode
         and current_config is not None
@@ -1723,7 +1729,7 @@ def _(
     else:
         training_result = None
         if (
-            should_train
+            should_start_training
             and frame_dataset is not None
             and training_config is not None
             and training_viewer_handle is not None
@@ -1780,17 +1786,19 @@ def _(
                 if snapshot.max_steps is not None
                 else str(snapshot.step)
             )
-            metric_parts = [
+            metric_text_parts = [
                 f"{name}={value:.6g}"
                 for name, value in sorted(snapshot.latest_metrics.items())
             ]
             if snapshot.primitive_count is not None:
-                metric_parts.append(f"primitives={snapshot.primitive_count:,}")
+                metric_text_parts.append(
+                    f"primitives={snapshot.primitive_count:,}"
+                )
             if snapshot.iterations_per_second is not None:
-                metric_parts.append(
+                metric_text_parts.append(
                     f"it/s={snapshot.iterations_per_second:.2f}"
                 )
-            metric_text = " | ".join(metric_parts)
+            metric_text = " | ".join(metric_text_parts)
             status_text = (
                 "Stopping" if snapshot.status == "stopping" else "Training"
             )

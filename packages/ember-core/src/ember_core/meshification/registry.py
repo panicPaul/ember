@@ -33,7 +33,8 @@ class RegisteredMeshifier:
 MESHIFIER_REGISTRY: dict[MeshifierName, RegisteredMeshifier] = {}
 
 
-def _infer_scene_device(scene: Scene) -> torch.device | None:
+def infer_scene_device(scene: Scene) -> torch.device | None:
+    """Return the first direct parameter or buffer device for a scene."""
     for tensor in scene.parameters(recurse=False):
         return tensor.device
     for tensor in scene.buffers(recurse=False):
@@ -50,6 +51,7 @@ def register_meshifier(
     """Register a meshification method as a decorator."""
 
     def decorator(extract_fn: Meshifier) -> Meshifier:
+        """Store a meshifier in the process-local registry."""
         MESHIFIER_REGISTRY[name] = RegisteredMeshifier(
             name=name,
             extract_fn=extract_fn,
@@ -94,7 +96,7 @@ def meshify(
         camera=camera,
         backend=backend,
         backend_options=backend_options,
-        device=_infer_scene_device(scene),
+        device=infer_scene_device(scene),
     )
     resolved_options = (
         options if options is not None else registered_meshifier.default_options

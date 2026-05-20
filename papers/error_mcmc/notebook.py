@@ -3,7 +3,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="columns")
+app = marimo.App(width="medium")
 
 with app.setup:
     import importlib.util
@@ -94,6 +94,8 @@ with app.setup:
 def _():
     mo.md("""
     # Error-MCMC training
+
+    ## IO
     """)
     return
 
@@ -134,15 +136,15 @@ def _(training_viewer):
     return
 
 
-@app.cell(column=1, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Training
+    ## IO wiring and execution
     """)
     return
 
 
-@app.cell(column=1)
+@app.cell
 def _():
     prepare_button = mo.ui.run_button(
         label="Prepare training inspector",
@@ -186,13 +188,13 @@ def _():
     )
 
 
-@app.cell(column=1)
+@app.cell
 def _():
     is_script_mode = not mo.running_in_notebook()
     return (is_script_mode,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(current_config):
     training_preparation_handle = None
     training_preparation_snapshot = None
@@ -213,7 +215,7 @@ def _(current_config):
     return training_preparation_handle, training_preparation_snapshot
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     current_config,
     is_script_mode,
@@ -221,11 +223,11 @@ def _(
     train_button,
     training_preparation_handle,
 ):
-    should_prepare = (
+    should_prepare_training_inputs = (
         is_script_mode or bool(prepare_button.value) or bool(train_button.value)
     )
     if (
-        should_prepare
+        should_prepare_training_inputs
         and current_config is not None
         and training_preparation_handle is not None
     ):
@@ -233,22 +235,24 @@ def _(
     return
 
 
-@app.cell(column=1)
+@app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
     )
     training_preparation_status = (
-        ember_splatting.render_training_preparation_status(_snapshot)
+        ember_splatting.render_training_preparation_status(
+            preparation_status_snapshot
+        )
     )
     return (training_preparation_status,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
@@ -259,7 +263,9 @@ def _(ember_splatting, training_preparation_snapshot):
         frame_dataset,
         frame_dataset_error,
         frame_view_catalog,
-    ) = ember_splatting.training_preparation_outputs(_snapshot)
+    ) = ember_splatting.training_preparation_outputs(
+        preparation_outputs_snapshot
+    )
     return (
         scene_load_error,
         scene_record,
@@ -269,7 +275,7 @@ def _(ember_splatting, training_preparation_snapshot):
     )
 
 
-@app.cell(column=1)
+@app.cell
 def _(current_config, frame_dataset):
     training_config = (
         resolve_training_config(current_config, frame_dataset)
@@ -279,7 +285,7 @@ def _(current_config, frame_dataset):
     return (training_config,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(current_config, frame_dataset, is_script_mode, training_config):
     training_viewer_handle = (
         ember_splatting.create_training_run(
@@ -297,7 +303,7 @@ def _(current_config, frame_dataset, is_script_mode, training_config):
     return (training_viewer_handle,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(frame_view_catalog, is_script_mode):
     training_inspector = (
         None
@@ -309,7 +315,7 @@ def _(frame_view_catalog, is_script_mode):
     return (training_inspector,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     frame_view_catalog,
     training_inspector,
@@ -328,7 +334,7 @@ def _(
     return (training_viewer,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     current_config,
     frame_dataset,
@@ -337,7 +343,7 @@ def _(
     training_config,
     training_viewer_handle,
 ):
-    should_train = bool(train_button.value)
+    should_start_training = bool(train_button.value)
     if (
         is_script_mode
         and current_config is not None
@@ -352,7 +358,7 @@ def _(
     else:
         training_result = None
         if (
-            should_train
+            should_start_training
             and frame_dataset is not None
             and training_config is not None
             and training_viewer_handle is not None
@@ -364,7 +370,7 @@ def _(
     return (training_result,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(stop_button, training_viewer_handle):
     should_stop = bool(stop_button.value)
     if should_stop and training_viewer_handle is not None:
@@ -372,7 +378,7 @@ def _(stop_button, training_viewer_handle):
     return
 
 
-@app.cell(column=1)
+@app.cell
 def _(training_result, training_status_refresh, training_viewer_handle):
     _ = training_status_refresh.value
     if training_result is not None:
@@ -392,13 +398,15 @@ def _(training_result, training_status_refresh, training_viewer_handle):
                 if snapshot.max_steps is not None
                 else str(snapshot.step)
             )
-            metric_parts = [
+            metric_text_parts = [
                 f"{name}={value:.6g}"
                 for name, value in sorted(snapshot.latest_metrics.items())
             ]
             if snapshot.primitive_count is not None:
-                metric_parts.append(f"primitives={snapshot.primitive_count:,}")
-            metric_text = " | ".join(metric_parts)
+                metric_text_parts.append(
+                    f"primitives={snapshot.primitive_count:,}"
+                )
+            metric_text = " | ".join(metric_text_parts)
             status_text = (
                 "Stopping" if snapshot.status == "stopping" else "Training"
             )
@@ -440,30 +448,30 @@ def _(training_result, training_status_refresh, training_viewer_handle):
     return (training_result_view,)
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Configuration
+    ## Method and config
     """)
     return
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCConfigBase(fastgs.FastGSConfigBase):
     """Strict base model for Error-MCMC paper configs."""
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCSceneConfig(fastgs.FastGSSceneConfig):
     """Scene-record loading options."""
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCDataConfig(fastgs.FastGSDataConfig):
     """Prepared-frame dataset options."""
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCInitializationConfig(fastgs.FastGSInitializationConfig):
     """Gaussian initialization tuned for MCMC-style relocation."""
 
@@ -487,21 +495,21 @@ class ErrorMCMCInitializationConfig(fastgs.FastGSInitializationConfig):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCRenderConfig(fastgs.FastGSRenderConfig):
     """Native FastGS render pipeline config for Error-MCMC."""
 
     backend: ErrorMCMCBackendName = "faster_gs.fastgs"
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCOptimizationConfig(fastgs.FastGSOptimizationConfig):
     """FastGS optimizer config with MCMC opacity learning rate."""
 
     opacity_lr: float = Field(default=0.05, gt=0.0)
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCLossConfig(fastgs.FastGSLossConfig):
     """Training loss config with light MCMC regularization defaults."""
 
@@ -517,7 +525,7 @@ class ErrorMCMCLossConfig(fastgs.FastGSLossConfig):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCDensificationConfig(ErrorMCMCConfigBase):
     """Error-aware MCMC relocation and capped growth config."""
 
@@ -557,7 +565,7 @@ class ErrorMCMCDensificationConfig(ErrorMCMCConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCFinalCleanupConfig(fastgs.FastGSFinalCleanupConfig):
     """Checkpoint cleanup config."""
 
@@ -570,7 +578,7 @@ class ErrorMCMCFinalCleanupConfig(fastgs.FastGSFinalCleanupConfig):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCMipSplattingConfig(fastgs.FastGSMipSplattingConfig):
     """Full Mip-Splatting controls enabled by default for Error-MCMC."""
 
@@ -578,7 +586,7 @@ class ErrorMCMCMipSplattingConfig(fastgs.FastGSMipSplattingConfig):
     screen_filter_enabled: bool = True
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCDensificationStackConfig(ErrorMCMCConfigBase):
     """Typed Error-MCMC densification stack config."""
 
@@ -611,7 +619,7 @@ class ErrorMCMCDensificationStackConfig(ErrorMCMCConfigBase):
         return ember.densification_config(*builders)
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCTrainingConfig(ErrorMCMCConfigBase):
     """Typed user-facing Error-MCMC training config."""
 
@@ -692,7 +700,7 @@ class ErrorMCMCTrainingConfig(ErrorMCMCConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class ErrorMCMCExperimentConfig(ErrorMCMCConfigBase):
     """Resolved Error-MCMC experiment config."""
 
@@ -702,7 +710,7 @@ class ErrorMCMCExperimentConfig(ErrorMCMCConfigBase):
     training: ErrorMCMCTrainingConfig
 
 
-@app.cell(column=2)
+@app.cell
 def _():
     error_mcmc_presets = error_mcmc_preset_catalog()
     config_gui = create_config_gui(
@@ -716,7 +724,7 @@ def _():
     return (config_gui,)
 
 
-@app.cell(column=2)
+@app.cell
 def _(config_gui):
     preset_selector = config_gui.preset_selector(
         label="Error-MCMC preset",
@@ -724,13 +732,13 @@ def _(config_gui):
     return (preset_selector,)
 
 
-@app.cell(column=2)
+@app.cell
 def _(config_gui):
     current_config = config_gui.validated_config()
     return (current_config,)
 
 
-@app.function(column=2)
+@app.function
 def default_checkpoint_dir(
     preset: ErrorMCMCDefaultName,
     backend: ErrorMCMCBackendName,
@@ -739,7 +747,7 @@ def default_checkpoint_dir(
     return DEFAULT_CHECKPOINT_ROOT / preset / backend
 
 
-@app.function(column=2)
+@app.function
 def error_mcmc_preset_catalog() -> ConfigPresetCatalog[
     ErrorMCMCExperimentConfig
 ]:
@@ -771,7 +779,7 @@ def error_mcmc_preset_catalog() -> ConfigPresetCatalog[
     )
 
 
-@app.function(column=2)
+@app.function
 def resolve_checkpoint_output_dir(
     config: ErrorMCMCExperimentConfig,
 ) -> Path:
@@ -786,7 +794,7 @@ def resolve_checkpoint_output_dir(
     return output_dir
 
 
-@app.function(column=2)
+@app.function
 def resolve_training_config(
     config: ErrorMCMCExperimentConfig,
     frame_dataset: ember.PreparedFrameDataset | None = None,
@@ -804,15 +812,15 @@ def resolve_training_config(
     return training.to_training_config(frame_dataset)
 
 
-@app.cell(column=3, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Support
+    ## Utilities
     """)
     return
 
 
-@app.function(column=3)
+@app.function
 def initialize_error_mcmc_model_from_scene_record(
     scene_record: ember.SceneRecord,
     *,
@@ -839,7 +847,7 @@ def initialize_error_mcmc_model_from_scene_record(
     )
 
 
-@app.function(column=3)
+@app.function
 def build_scene_load_config(
     config: ErrorMCMCExperimentConfig,
 ) -> ember.ColmapSceneConfig:
@@ -847,7 +855,7 @@ def build_scene_load_config(
     return fastgs.build_scene_load_config(config)
 
 
-@app.function(column=3)
+@app.function
 def build_prepared_frame_dataset_config(
     config: ErrorMCMCExperimentConfig,
 ) -> ember.PreparedFrameDatasetConfig:
@@ -855,13 +863,13 @@ def build_prepared_frame_dataset_config(
     return fastgs.build_prepared_frame_dataset_config(config)
 
 
-@app.function(column=3)
+@app.function
 def format_duration(seconds: float) -> str:
     """Format a short ETA duration."""
     return fastgs.format_duration(seconds)
 
 
-@app.function(column=3)
+@app.function
 def run_error_mcmc_training(
     frame_dataset: ember.PreparedFrameDataset,
     experiment_config: ErrorMCMCExperimentConfig,

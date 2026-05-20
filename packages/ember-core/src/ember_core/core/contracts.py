@@ -144,7 +144,7 @@ class Scene(nn.Module, ABC):
                 continue
             self.register_buffer(name, value.detach())
             installed[name] = cast("Tensor", getattr(self, name))
-        self._validate()
+        self.validate()
         return installed
 
     def _clear_unregistered_field(self, name: str) -> None:
@@ -233,7 +233,7 @@ class Scene(nn.Module, ABC):
             else:
                 setattr(copied, name, copied_value)
 
-        copied._validate()
+        copied.validate()
         return cast("Self", copied)
 
     @staticmethod
@@ -249,7 +249,7 @@ class Scene(nn.Module, ABC):
         return copied
 
     @abstractmethod
-    def _validate(self) -> None:
+    def validate(self) -> None:
         """Validate scene field consistency."""
 
 
@@ -336,7 +336,7 @@ class GaussianScene(Scene, ABC):
             self._to_parameter(logit_opacity),
         )
         self.register_parameter("feature", self._to_parameter(feature))
-        self._validate()
+        self.validate()
 
     @property
     def scene_family(self) -> SceneFamily:
@@ -354,7 +354,8 @@ class GaussianScene(Scene, ABC):
             return value
         return nn.Parameter(value, requires_grad=value.requires_grad)
 
-    def _validate(self) -> None:
+    def validate(self) -> None:
+        """Validate Gaussian scene tensor shapes."""
         if self.log_scales.shape[-1] != self.spatial_dims:
             raise ValueError(
                 "Gaussian scene scale dimensionality mismatch: expected "
@@ -430,8 +431,7 @@ class RadFoamScene(Scene):
         att_dc: Float[Tensor, "num_points 3"],
         att_sh: Float[Tensor, "num_points sh_coeffs"],
         point_adjacency: (
-            Int[Tensor, " num_adjacency"]
-            | UInt[Tensor, " num_adjacency"]
+            Int[Tensor, " num_adjacency"] | UInt[Tensor, " num_adjacency"]
         ),
         point_adjacency_offsets: (
             Int[Tensor, " adjacency_offsets"]
@@ -455,7 +455,7 @@ class RadFoamScene(Scene):
             "point_adjacency_offsets",
             point_adjacency_offsets,
         )
-        self._validate()
+        self.validate()
 
     @property
     def scene_family(self) -> SceneFamily:
@@ -468,13 +468,12 @@ class RadFoamScene(Scene):
             return value
         return nn.Parameter(value, requires_grad=value.requires_grad)
 
-    def _validate(self) -> None:
+    def validate(self) -> None:
+        """Validate Radiant Foam scene tensor shapes and metadata."""
         if self.sh_degree < 0:
             raise ValueError("RadFoamScene.sh_degree must be non-negative.")
         if self.activation_scale <= 0.0:
-            raise ValueError(
-                "RadFoamScene.activation_scale must be positive."
-            )
+            raise ValueError("RadFoamScene.activation_scale must be positive.")
         if self.primal_points.ndim != 2 or self.primal_points.shape[-1] != 3:
             raise ValueError(
                 "RadFoamScene.primal_points must have shape "
@@ -589,7 +588,8 @@ class PowerFoamScene(Scene):
             "num_points num_texel_sites sv_rgb_coeffs",
         ],
         texel_height: Float[Tensor, "num_points num_texel_sites"],
-        adjacency: Int[Tensor, " num_adjacency"] | UInt[Tensor, " num_adjacency"],
+        adjacency: Int[Tensor, " num_adjacency"]
+        | UInt[Tensor, " num_adjacency"],
         adjacency_offsets: (
             Int[Tensor, " adjacency_offsets"]
             | UInt[Tensor, " adjacency_offsets"]
@@ -623,7 +623,7 @@ class PowerFoamScene(Scene):
         )
         self.register_buffer("adjacency", adjacency)
         self.register_buffer("adjacency_offsets", adjacency_offsets)
-        self._validate()
+        self.validate()
 
     @property
     def scene_family(self) -> SceneFamily:
@@ -636,13 +636,12 @@ class PowerFoamScene(Scene):
             return value
         return nn.Parameter(value, requires_grad=value.requires_grad)
 
-    def _validate(self) -> None:
+    def validate(self) -> None:
+        """Validate PowerFoam scene tensor shapes and metadata."""
         if self.sv_dof <= 0:
             raise ValueError("PowerFoamScene.sv_dof must be positive.")
         if self.num_texel_sites <= 0:
-            raise ValueError(
-                "PowerFoamScene.num_texel_sites must be positive."
-            )
+            raise ValueError("PowerFoamScene.num_texel_sites must be positive.")
         if self.points.ndim != 2 or self.points.shape[-1] != 3:
             raise ValueError(
                 "PowerFoamScene.points must have shape "
@@ -788,7 +787,7 @@ class SparseVoxelScene(Scene):
                 else self._to_parameter(subdivision_priority)
             ),
         )
-        self._validate()
+        self.validate()
 
     @property
     def scene_family(self) -> SceneFamily:
@@ -801,7 +800,8 @@ class SparseVoxelScene(Scene):
             return value
         return nn.Parameter(value, requires_grad=value.requires_grad)
 
-    def _validate(self) -> None:
+    def validate(self) -> None:
+        """Validate sparse-voxel scene tensor shapes and metadata."""
         if self.max_num_levels < 1:
             raise ValueError("SparseVoxelScene.max_num_levels must be >= 1.")
         if self.octpath.shape[0] != self.octlevel.shape[0]:

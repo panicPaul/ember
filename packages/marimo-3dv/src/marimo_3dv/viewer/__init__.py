@@ -38,14 +38,17 @@ class NoopViewer:
     """Non-rendering placeholder returned outside live marimo runtimes."""
 
     def __init__(self, *, state: ViewerState) -> None:
+        """Create a script-mode viewer placeholder."""
         self.state = state
-        self._closed = False
+        self.closed = False
 
     def close(self) -> None:
         """Mark the placeholder as closed."""
-        self._closed = True
+        self.closed = True
 
-    def rerender(self, *, interactive: bool = False, wait: bool = False) -> None:
+    def rerender(
+        self, *, interactive: bool = False, wait: bool = False
+    ) -> None:
         """No-op render scheduling method matching ``MarimoViewer``."""
         del interactive, wait
 

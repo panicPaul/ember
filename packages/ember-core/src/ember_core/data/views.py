@@ -43,6 +43,7 @@ class PreparedFrameViewCatalog:
         config: PreparedFrameDatasetConfig | None = None,
         training_split: PreparedFrameViewSplit = "train",
     ) -> None:
+        """Create train and validation views over a shared prepared cache."""
         self.scene_record = scene_record
         self.config = config or PreparedFrameDatasetConfig()
         self.training_split = training_split
@@ -50,16 +51,16 @@ class PreparedFrameViewCatalog:
             scene_record,
             config=self.config,
         )
-        self._datasets = {
-            split: self._build_dataset(
+        self.datasets_by_split = {
+            split: self.build_dataset(
                 split,
                 lazy=split != self.training_split,
             )
             for split in ("train", "val")
         }
-        self._views = {
-            "train": self._build_views("train"),
-            "val": self._build_views("val"),
+        self.views_by_split = {
+            "train": self.build_views("train"),
+            "val": self.build_views("val"),
         }
 
     @property
@@ -72,14 +73,14 @@ class PreparedFrameViewCatalog:
         split: PreparedFrameViewSplit,
     ) -> PreparedFrameDataset:
         """Return the prepared dataset for a split."""
-        return self._datasets[split]
+        return self.datasets_by_split[split]
 
     def views(
         self,
         split: PreparedFrameViewSplit,
     ) -> tuple[PreparedFrameViewRef, ...]:
         """Return the selectable prepared views for a split."""
-        return self._views[split]
+        return self.views_by_split[split]
 
     def view_options(
         self,
@@ -120,32 +121,34 @@ class PreparedFrameViewCatalog:
 
     def camera(self, view_ref: PreparedFrameViewRef) -> CameraState:
         """Return the prepared camera for a view without loading RGB."""
-        self._validate_view_ref(view_ref)
+        self.validate_view_ref(view_ref)
         return self.dataset(view_ref.split).prepared_camera(view_ref.index)
 
     def sample(self, view_ref: PreparedFrameViewRef) -> PreparedFrameSample:
         """Return the prepared sample for a view."""
-        self._validate_view_ref(view_ref)
+        self.validate_view_ref(view_ref)
         return self.dataset(view_ref.split)[view_ref.index]
 
-    def _build_dataset(
+    def build_dataset(
         self,
         split: PreparedFrameViewSplit,
         *,
         lazy: bool,
     ) -> PreparedFrameDataset:
+        """Build the prepared dataset for one split."""
         return PreparedFrameDataset(
             self.scene_record,
-            config=self._config_for_split(split, lazy=lazy),
+            config=self.config_for_split(split, lazy=lazy),
             sample_cache=self.sample_cache,
         )
 
-    def _config_for_split(
+    def config_for_split(
         self,
         split: PreparedFrameViewSplit,
         *,
         lazy: bool,
     ) -> PreparedFrameDatasetConfig:
+        """Return this catalog's dataset config specialized for one split."""
         materialization = self.config.materialization
         if lazy and materialization is not None:
             materialization = materialization.model_copy(
@@ -155,15 +158,16 @@ class PreparedFrameViewCatalog:
             materialization = MaterializationConfig(mode="lazy")
         return self.config.model_copy(
             update={
-                "split": _split_config_for_target(self.config.split, split),
+                "split": split_config_for_target(self.config.split, split),
                 "materialization": materialization,
             }
         )
 
-    def _build_views(
+    def build_views(
         self,
         split: PreparedFrameViewSplit,
     ) -> tuple[PreparedFrameViewRef, ...]:
+        """Build stable view references for one dataset split."""
         dataset = self.dataset(split)
         return tuple(
             PreparedFrameViewRef(
@@ -171,7 +175,7 @@ class PreparedFrameViewCatalog:
                 index=index,
                 source_index=source_index,
                 frame_id=dataset.camera_stream.frames[source_index].frame_id,
-                label=_view_label(
+                label=view_label(
                     split,
                     index=index,
                     source_index=source_index,
@@ -183,7 +187,8 @@ class PreparedFrameViewCatalog:
             for index, source_index in enumerate(dataset.indices)
         )
 
-    def _validate_view_ref(self, view_ref: PreparedFrameViewRef) -> None:
+    def validate_view_ref(self, view_ref: PreparedFrameViewRef) -> None:
+        """Raise when a view reference no longer matches this catalog."""
         views = self.views(view_ref.split)
         if not 0 <= view_ref.index < len(views):
             raise IndexError(
@@ -195,10 +200,11 @@ class PreparedFrameViewCatalog:
             raise ValueError("Prepared frame view reference is stale.")
 
 
-def _split_config_for_target(
+def split_config_for_target(
     split: SplitConfig | None,
     target: PreparedFrameViewSplit,
 ) -> SplitConfig | None:
+    """Return a split config pinned to the requested target split."""
     if split is None:
         return None
     if split.target == "all" or split.mode == "none":
@@ -206,13 +212,14 @@ def _split_config_for_target(
     return split.model_copy(update={"target": target})
 
 
-def _view_label(
+def view_label(
     split: PreparedFrameViewSplit,
     *,
     index: int,
     source_index: int,
     frame_id: str,
 ) -> str:
+    """Return a compact human-readable label for one prepared view."""
     return f"{split} {index:04d} | source {source_index:04d} | {frame_id}"
 
 

@@ -3,7 +3,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="columns")
+app = marimo.App(width="medium")
 
 with app.setup:
     import json
@@ -63,6 +63,8 @@ with app.setup:
 def _():
     mo.md("""
     # FasterGS training
+
+    ## IO
     """)
     return
 
@@ -133,7 +135,7 @@ def _(training_viewer):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Config definition
+    ## Method and config
     """)
     return
 
@@ -564,7 +566,7 @@ class FasterGSExperimentConfig(FasterGSConfigBase):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Function definitions
+    ## Training assembly
     """)
     return
 
@@ -765,7 +767,7 @@ def initialize_fastergs_model_from_scene_record(
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training setup
+    ## IO wiring
     """)
     return
 
@@ -854,10 +856,10 @@ def enforce_fastergs_resized_cache_limit(
         shutil.rmtree(stale_cache)
 
 
-@app.cell(column=1, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Training
+    ## Execution
     """)
     return
 
@@ -922,11 +924,11 @@ def _(
     train_button,
     training_preparation_handle,
 ):
-    should_prepare = (
+    should_prepare_training_inputs = (
         is_script_mode or bool(prepare_button.value) or bool(train_button.value)
     )
     if (
-        should_prepare
+        should_prepare_training_inputs
         and current_config is not None
         and training_preparation_handle is not None
     ):
@@ -936,20 +938,22 @@ def _(
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
     )
     training_preparation_status = (
-        ember_splatting.render_training_preparation_status(_snapshot)
+        ember_splatting.render_training_preparation_status(
+            preparation_status_snapshot
+        )
     )
     return (training_preparation_status,)
 
 
 @app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
@@ -960,7 +964,9 @@ def _(ember_splatting, training_preparation_snapshot):
         frame_dataset,
         frame_dataset_error,
         frame_view_catalog,
-    ) = ember_splatting.training_preparation_outputs(_snapshot)
+    ) = ember_splatting.training_preparation_outputs(
+        preparation_outputs_snapshot
+    )
     return (
         scene_load_error,
         scene_record,
@@ -1049,17 +1055,19 @@ def _(training_result, training_status_refresh, training_viewer_handle):
                 if snapshot.max_steps is not None
                 else str(snapshot.step)
             )
-            metric_parts = [
+            metric_text_parts = [
                 f"{name}={value:.6g}"
                 for name, value in sorted(snapshot.latest_metrics.items())
             ]
             if snapshot.primitive_count is not None:
-                metric_parts.append(f"primitives={snapshot.primitive_count:,}")
+                metric_text_parts.append(
+                    f"primitives={snapshot.primitive_count:,}"
+                )
             if snapshot.iterations_per_second is not None:
-                metric_parts.append(
+                metric_text_parts.append(
                     f"it/s={snapshot.iterations_per_second:.2f}"
                 )
-            metric_text = " | ".join(metric_parts)
+            metric_text = " | ".join(metric_text_parts)
             status_text = (
                 "Stopping" if snapshot.status == "stopping" else "Training"
             )
@@ -1101,10 +1109,10 @@ def _(training_result, training_status_refresh, training_viewer_handle):
     return (training_result_view,)
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Densification
+    ## Densification implementation
     """)
     return
 
@@ -1366,10 +1374,10 @@ class FasterGSFinalCleanup(BaseDensificationMethod):
         self.family_ops.reorder(morton_order(scene.center_position))
 
 
-@app.cell(column=3, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Support
+    ## Utilities
     """)
     return
 

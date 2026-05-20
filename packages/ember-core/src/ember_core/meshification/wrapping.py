@@ -29,10 +29,11 @@ class WrappingMeshificationOptions(MeshificationOptions):
     inside_threshold: float = 0.5
 
 
-def _box_mesh_from_bounds(
+def box_mesh_from_bounds(
     bounds_min: Float[Tensor, " 3"],
     bounds_max: Float[Tensor, " 3"],
 ) -> MeshArtifact:
+    """Build an axis-aligned box mesh that encloses the supplied bounds."""
     x0, y0, z0 = bounds_min.unbind(dim=0)
     x1, y1, z1 = bounds_max.unbind(dim=0)
     vertices = torch.stack(
@@ -116,7 +117,7 @@ def extract_wrapping_mesh(
     padding = extents * resolved_options.padding_fraction
     center = (bounds_min + bounds_max) * 0.5
     half_extent = extents * 0.5 + padding
-    mesh = _box_mesh_from_bounds(center - half_extent, center + half_extent)
+    mesh = box_mesh_from_bounds(center - half_extent, center + half_extent)
     return MeshificationResult(
         mesh=mesh,
         diagnostics={

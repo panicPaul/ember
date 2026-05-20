@@ -1,4 +1,4 @@
-"""Private JIT extension loaders for Gaussian Wrapping CUDA stages."""
+"""JIT extension loaders for Gaussian Wrapping CUDA stages."""
 
 from __future__ import annotations
 
@@ -9,7 +9,8 @@ from typing import Any
 from ember_core.native.torch_extensions import load_torch_extension
 
 
-def _load_wrapping_extension(name: str, native_root: Path) -> Any:
+def load_wrapping_extension(name: str, native_root: Path) -> Any:
+    """Compile and load one Gaussian Wrapping CUDA extension variant."""
     upstream_root = native_root / "upstream"
     return load_torch_extension(
         name=name,
@@ -70,7 +71,7 @@ def _load_wrapping_extension(name: str, native_root: Path) -> Any:
 def load_ours_extension() -> Any:
     """Compile and load the Gaussian Wrapping ``ours`` CUDA extension."""
     native_root = Path(__file__).resolve().parent.parent / "native" / "ours"
-    return _load_wrapping_extension(
+    return load_wrapping_extension(
         "ember_gaussian_wrapping_ours_native_ext",
         native_root,
     )
@@ -80,7 +81,7 @@ def load_ours_extension() -> Any:
 def load_radegs_extension() -> Any:
     """Compile and load the Gaussian Wrapping RaDe-GS CUDA extension."""
     native_root = Path(__file__).resolve().parent.parent / "native" / "radegs"
-    return _load_wrapping_extension(
+    return load_wrapping_extension(
         "ember_gaussian_wrapping_radegs_native_ext",
         native_root,
     )

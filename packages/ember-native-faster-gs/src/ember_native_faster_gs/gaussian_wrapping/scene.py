@@ -45,6 +45,7 @@ class GaussianWrappingScene(GaussianScene3D):
         normal_feature_dim: int = 3,
         num_pivots: int = 9,
     ) -> None:
+        """Create a Gaussian scene with wrapping occupancy fields."""
         self.normal_feature_dim = normal_feature_dim
         self.num_pivots = num_pivots
         super().__init__(
@@ -73,17 +74,18 @@ class GaussianWrappingScene(GaussianScene3D):
 
         self.register_parameter(
             "normal_features",
-            self._to_parameter(normal_features),
+            self.to_parameter(normal_features),
         )
         self.register_buffer("base_occupancy", base_occupancy)
         self.register_parameter(
             "occupancy_shift",
-            self._to_parameter(occupancy_shift),
+            self.to_parameter(occupancy_shift),
         )
-        self._validate()
+        self.validate_wrapping_fields()
 
     @staticmethod
-    def _to_parameter(value: Tensor) -> nn.Parameter:
+    def to_parameter(value: Tensor) -> nn.Parameter:
+        """Return a tensor as a trainable module parameter."""
         if isinstance(value, nn.Parameter):
             return value
         return nn.Parameter(value, requires_grad=value.requires_grad)
@@ -103,8 +105,9 @@ class GaussianWrappingScene(GaussianScene3D):
         """Return the upstream-style negative occupancy logits."""
         return -self.occupancy_logits
 
-    def _validate(self) -> None:
-        super()._validate()
+    def validate_wrapping_fields(self) -> None:
+        """Validate wrapping-specific tensor shapes."""
+        super().validate()
         if self.normal_feature_dim <= 0:
             raise ValueError(
                 "GaussianWrappingScene.normal_feature_dim must be positive."
@@ -114,31 +117,24 @@ class GaussianWrappingScene(GaussianScene3D):
                 "GaussianWrappingScene.num_pivots must be positive."
             )
 
-        normal_features = getattr(self, "normal_features", None)
-        base_occupancy = getattr(self, "base_occupancy", None)
-        occupancy_shift = getattr(self, "occupancy_shift", None)
-        if (
-            normal_features is None
-            or base_occupancy is None
-            or occupancy_shift is None
-        ):
-            return
-
         num_splats = int(self.center_position.shape[0])
         expected_normal_shape = (num_splats, self.normal_feature_dim)
-        if tuple(normal_features.shape) != expected_normal_shape:
+        if tuple(self.normal_features.shape) != expected_normal_shape:
             raise ValueError(
                 "GaussianWrappingScene.normal_features must have shape "
-                f"{expected_normal_shape}; got {tuple(normal_features.shape)}."
+                f"{expected_normal_shape}; "
+                f"got {tuple(self.normal_features.shape)}."
             )
         expected_occupancy_shape = (num_splats, self.num_pivots)
-        if tuple(base_occupancy.shape) != expected_occupancy_shape:
+        if tuple(self.base_occupancy.shape) != expected_occupancy_shape:
             raise ValueError(
                 "GaussianWrappingScene.base_occupancy must have shape "
-                f"{expected_occupancy_shape}; got {tuple(base_occupancy.shape)}."
+                f"{expected_occupancy_shape}; "
+                f"got {tuple(self.base_occupancy.shape)}."
             )
-        if tuple(occupancy_shift.shape) != expected_occupancy_shape:
+        if tuple(self.occupancy_shift.shape) != expected_occupancy_shape:
             raise ValueError(
                 "GaussianWrappingScene.occupancy_shift must have shape "
-                f"{expected_occupancy_shape}; got {tuple(occupancy_shift.shape)}."
+                f"{expected_occupancy_shape}; "
+                f"got {tuple(self.occupancy_shift.shape)}."
             )

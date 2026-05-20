@@ -838,7 +838,7 @@ def test_marimo_viewer_reuses_explicit_state_across_reruns() -> None:
     assert second_viewer.get_camera_state().width == 32
     assert second_viewer.get_camera_state().height == 24
     assert second_viewer.get_camera_state().fov_degrees == 45.0
-    assert first_viewer._closed is True
+    assert first_viewer.closed is True
 
 
 def test_process_cleanup_closes_active_viewers() -> None:
@@ -857,8 +857,8 @@ def test_process_cleanup_closes_active_viewers() -> None:
 
     _cleanup_active_marimo_viewers()
 
-    assert first_viewer._closed is True
-    assert second_viewer._closed is True
+    assert first_viewer.closed is True
+    assert second_viewer.closed is True
 
 
 def test_viewer_state_can_reset_camera_to_initial_value() -> None:

@@ -3,7 +3,7 @@
 import marimo
 
 __generated_with = "0.23.5"
-app = marimo.App(width="columns")
+app = marimo.App(width="medium")
 
 with app.setup:
     import sys
@@ -43,6 +43,8 @@ with app.setup:
 def _():
     mo.md("""
     # PowerFoam training
+
+    ## IO
     """)
     return
 
@@ -100,7 +102,7 @@ def _(training_viewer):
 @app.cell(hide_code=True)
 def _():
     mo.md("""
-    ## Training setup
+    ## IO wiring
     """)
     return
 
@@ -155,15 +157,15 @@ def _():
     return (is_script_mode,)
 
 
-@app.cell(column=1, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Training
+    ## Execution
     """)
     return
 
 
-@app.function(column=1)
+@app.function
 def format_duration(seconds: float) -> str:
     """Format a short ETA duration."""
     total_seconds = max(0, round(seconds))
@@ -176,7 +178,7 @@ def format_duration(seconds: float) -> str:
     return f"{seconds:d}s"
 
 
-@app.cell(column=1)
+@app.cell
 def _(current_config):
     training_preparation_handle = None
     training_preparation_snapshot = None
@@ -197,7 +199,7 @@ def _(current_config):
     return training_preparation_handle, training_preparation_snapshot
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     current_config,
     is_script_mode,
@@ -205,11 +207,11 @@ def _(
     train_button,
     training_preparation_handle,
 ):
-    should_prepare = (
+    should_prepare_training_inputs = (
         is_script_mode or bool(prepare_button.value) or bool(train_button.value)
     )
     if (
-        should_prepare
+        should_prepare_training_inputs
         and current_config is not None
         and training_preparation_handle is not None
     ):
@@ -217,22 +219,24 @@ def _(
     return
 
 
-@app.cell(column=1)
+@app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
     )
     training_preparation_status = (
-        ember_splatting.render_training_preparation_status(_snapshot)
+        ember_splatting.render_training_preparation_status(
+            preparation_status_snapshot
+        )
     )
     return (training_preparation_status,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(ember_splatting, training_preparation_snapshot):
-    _snapshot = (
+    preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
         else None
@@ -243,7 +247,9 @@ def _(ember_splatting, training_preparation_snapshot):
         frame_dataset,
         frame_dataset_error,
         frame_view_catalog,
-    ) = ember_splatting.training_preparation_outputs(_snapshot)
+    ) = ember_splatting.training_preparation_outputs(
+        preparation_outputs_snapshot
+    )
     return (
         scene_load_error,
         scene_record,
@@ -253,7 +259,7 @@ def _(ember_splatting, training_preparation_snapshot):
     )
 
 
-@app.cell(column=1)
+@app.cell
 def _(current_config, frame_dataset):
     training_config = (
         resolve_training_config(current_config)
@@ -268,7 +274,7 @@ def _(current_config, frame_dataset):
     return training_config, viewer_config
 
 
-@app.cell(column=1)
+@app.cell
 def _(frame_dataset, is_script_mode, training_config, viewer_config):
     training_viewer_error = None
     try:
@@ -290,7 +296,7 @@ def _(frame_dataset, is_script_mode, training_config, viewer_config):
     return training_viewer_error, training_viewer_handle
 
 
-@app.cell(column=1)
+@app.cell
 def _(frame_view_catalog, is_script_mode):
     training_inspector = (
         None
@@ -302,7 +308,7 @@ def _(frame_view_catalog, is_script_mode):
     return (training_inspector,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     frame_view_catalog,
     training_inspector,
@@ -321,7 +327,7 @@ def _(
     return (training_viewer,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     current_config,
     frame_dataset,
@@ -330,7 +336,7 @@ def _(
     training_config,
     training_viewer_handle,
 ):
-    should_train = bool(train_button.value)
+    should_start_training = bool(train_button.value)
     if (
         is_script_mode
         and current_config is not None
@@ -344,7 +350,7 @@ def _(
     else:
         training_result = None
         if (
-            should_train
+            should_start_training
             and frame_dataset is not None
             and training_config is not None
             and training_viewer_handle is not None
@@ -356,7 +362,7 @@ def _(
     return (training_result,)
 
 
-@app.cell(column=1)
+@app.cell
 def _(stop_button, training_viewer_handle):
     should_stop = bool(stop_button.value)
     if should_stop and training_viewer_handle is not None:
@@ -364,7 +370,7 @@ def _(stop_button, training_viewer_handle):
     return
 
 
-@app.cell(column=1)
+@app.cell
 def _(
     frame_dataset_error,
     scene_load_error,
@@ -406,17 +412,19 @@ def _(
                 if snapshot.max_steps is not None
                 else str(snapshot.step)
             )
-            metric_parts = [
+            metric_text_parts = [
                 f"{name}={value:.6g}"
                 for name, value in sorted(snapshot.latest_metrics.items())
             ]
             if snapshot.primitive_count is not None:
-                metric_parts.append(f"primitives={snapshot.primitive_count:,}")
+                metric_text_parts.append(
+                    f"primitives={snapshot.primitive_count:,}"
+                )
             if snapshot.iterations_per_second is not None:
-                metric_parts.append(
+                metric_text_parts.append(
                     f"it/s={snapshot.iterations_per_second:.2f}"
                 )
-            metric_text = " | ".join(metric_parts)
+            metric_text = " | ".join(metric_text_parts)
             status_text = (
                 "Stopping" if snapshot.status == "stopping" else "Training"
             )
@@ -458,22 +466,22 @@ def _(
     return (training_result_view,)
 
 
-@app.cell(column=2, hide_code=True)
+@app.cell(hide_code=True)
 def _():
     mo.md("""
-    # Support Code
+    ## Utilities
     """)
     return
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamConfigBase(BaseModel):
     """Strict base model for PowerFoam paper configs."""
 
     model_config = {"extra": "forbid", "populate_by_name": True}
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamSceneConfig(PowerFoamConfigBase):
     """Scene-record loading options."""
 
@@ -483,7 +491,7 @@ class PowerFoamSceneConfig(PowerFoamConfigBase):
     align_horizon: bool = True
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamDataConfig(PowerFoamConfigBase):
     """Prepared-frame dataset options."""
 
@@ -501,7 +509,7 @@ class PowerFoamDataConfig(PowerFoamConfigBase):
     interpolation: Literal["nearest", "bilinear", "bicubic"] = "bicubic"
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamInitializationConfig(PowerFoamConfigBase):
     """Typed PowerFoam initialization config."""
 
@@ -531,7 +539,7 @@ class PowerFoamInitializationConfig(PowerFoamConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamRenderConfig(PowerFoamConfigBase):
     """Typed PowerFoam render pipeline config."""
 
@@ -573,7 +581,7 @@ class PowerFoamRenderConfig(PowerFoamConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamLossConfig(PowerFoamConfigBase):
     """Typed PowerFoam loss config."""
 
@@ -600,7 +608,7 @@ class PowerFoamLossConfig(PowerFoamConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamDensificationConfig(PowerFoamConfigBase):
     """Typed PowerFoam resampling config."""
 
@@ -640,7 +648,7 @@ class PowerFoamDensificationConfig(PowerFoamConfigBase):
         )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamTrainingConfig(PowerFoamConfigBase):
     """Top-level runtime PowerFoam training knobs."""
 
@@ -686,7 +694,7 @@ class PowerFoamTrainingConfig(PowerFoamConfigBase):
     )
 
 
-@app.class_definition(column=2)
+@app.class_definition
 class PowerFoamExperimentConfig(PowerFoamConfigBase):
     """Serializable PowerFoam experiment config."""
 
@@ -698,7 +706,7 @@ class PowerFoamExperimentConfig(PowerFoamConfigBase):
     )
 
 
-@app.function(column=2)
+@app.function
 def powerfoam_preset_catalog() -> ConfigPresetCatalog:
     """Load PowerFoam defaults from JSON files."""
     return ConfigPresetCatalog(
@@ -721,7 +729,7 @@ def powerfoam_preset_catalog() -> ConfigPresetCatalog:
     )
 
 
-@app.function(column=2)
+@app.function
 def resolve_checkpoint_output_dir(config: PowerFoamExperimentConfig) -> Path:
     """Resolve the checkpoint directory for the current PowerFoam config."""
     output_dir = config.training.checkpoint.output_dir.expanduser()
@@ -731,7 +739,7 @@ def resolve_checkpoint_output_dir(config: PowerFoamExperimentConfig) -> Path:
     return output_dir
 
 
-@app.function(column=2)
+@app.function
 def resolve_training_config(
     experiment_config: PowerFoamExperimentConfig,
 ) -> ember.TrainingConfig:
@@ -763,7 +771,7 @@ def resolve_training_config(
     )
 
 
-@app.function(column=2)
+@app.function
 def build_scene_load_config(
     config: PowerFoamExperimentConfig,
 ) -> ember.ColmapSceneConfig:
@@ -771,7 +779,7 @@ def build_scene_load_config(
     return build_foam_scene_load_config(config)
 
 
-@app.function(column=2)
+@app.function
 def build_prepared_frame_dataset_config(
     config: PowerFoamExperimentConfig,
 ) -> ember.PreparedFrameDatasetConfig:
@@ -779,7 +787,7 @@ def build_prepared_frame_dataset_config(
     return build_foam_prepared_frame_dataset_config(config)
 
 
-@app.function(column=2)
+@app.function
 def run_powerfoam_training(
     frame_dataset: ember.PreparedFrameDataset,
     *,

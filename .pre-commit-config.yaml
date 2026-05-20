@@ -58,3 +58,9 @@ repos:
         pass_filenames: false
         always_run: true
         stages: [pre-commit]
+      - id: package-quality-audit
+        name: package quality audit
+        entry: uv run python scripts/check_package_quality.py --summary-only
+        language: system
+        pass_filenames: false
+        stages: [manual]

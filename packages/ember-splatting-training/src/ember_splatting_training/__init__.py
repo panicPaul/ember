@@ -11,6 +11,8 @@ except ImportError:
         __version__ = "0.0.0"
 
 __all__ = [
+    "TRAINING_VIEW_RENDER_MODES",
+    "TRAINING_VIEW_RENDER_MODE_LABELS",
     "FastGSDensificationRecipe",
     "FastGSFinalPruneMode",
     "FusedAdam",
@@ -21,6 +23,7 @@ __all__ = [
     "GaussianMortonOrdering",
     "TrainingPreparationHandle",
     "TrainingPreparationSnapshot",
+    "TrainingViewDepthRangeMode",
     "TrainingViewInspection",
     "TrainingViewInspector",
     "TrainingViewInspectorConfig",
@@ -28,6 +31,8 @@ __all__ = [
     "TrainingViewMapContext",
     "TrainingViewMapResult",
     "TrainingViewMapSpec",
+    "TrainingViewPreview",
+    "TrainingViewRenderMode",
     "TrainingViewerConfig",
     "TrainingViewerErrorMap",
     "TrainingViewerHandle",
@@ -36,6 +41,7 @@ __all__ = [
     "TrainingViserViewerConfig",
     "active_sh_bases_for_step",
     "add_noise",
+    "available_training_view_render_modes",
     "checkpoint_logs_dir",
     "create_training_preparation",
     "create_training_run",
@@ -63,6 +69,8 @@ __all__ = [
     "ssim_score",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_view_render_mode_options",
+    "training_view_render_modes_for_config",
     "viridis_error_map",
 ]
 
@@ -99,8 +107,11 @@ def __getattr__(name: str) -> object:
             return getattr(losses, name)
         case (
             "TrainingViewerConfig"
+            | "TRAINING_VIEW_RENDER_MODE_LABELS"
+            | "TRAINING_VIEW_RENDER_MODES"
             | "TrainingPreparationHandle"
             | "TrainingPreparationSnapshot"
+            | "TrainingViewDepthRangeMode"
             | "TrainingViewInspection"
             | "TrainingViewInspector"
             | "TrainingViewInspectorConfig"
@@ -108,19 +119,25 @@ def __getattr__(name: str) -> object:
             | "TrainingViewMapContext"
             | "TrainingViewMapResult"
             | "TrainingViewMapSpec"
+            | "TrainingViewPreview"
+            | "TrainingViewRenderMode"
             | "TrainingViewerErrorMap"
             | "TrainingViewerHandle"
             | "TrainingViewerHook"
             | "TrainingViewerSnapshot"
             | "TrainingViserViewerConfig"
+            | "available_training_view_render_modes"
             | "create_training_preparation"
             | "create_training_run"
             | "create_training_view_inspector"
             | "create_training_viewer"
             | "render_training_view_inspector"
             | "render_training_preparation_status"
+            | "ssim_error_map"
             | "training_inspector_spinner"
             | "training_preparation_outputs"
+            | "training_view_render_mode_options"
+            | "training_view_render_modes_for_config"
             | "viridis_error_map"
         ):
             from ember_splatting_training import training_viewer

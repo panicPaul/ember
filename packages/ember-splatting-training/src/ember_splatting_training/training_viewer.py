@@ -16,6 +16,7 @@ from typing import Any, Literal
 import marimo as mo
 import torch
 from ember_core.core.contracts import CameraState, Scene
+from ember_core.core.registry import BACKEND_REGISTRY
 from ember_core.data import (
     MaterializationProgress,
     PreparedFrameDataset,
@@ -40,6 +41,7 @@ from jaxtyping import Float, UInt8
 from marimo._plugins.core.web_component import JSONType
 from marimo._plugins.ui._core.ui_element import UIElement
 from torch import Tensor
+from torch.nn import functional as F
 
 _ACTIVE_TRAINING_VIEWERS: dict[
     int, weakref.ReferenceType[TrainingViewerHandle]
@@ -107,6 +109,21 @@ def _bind_viewer_close_to_training(handle: TrainingViewerHandle) -> None:
 
 
 TrainingViewerBackend = Literal["marimo_3dv", "viser"]
+TrainingViewRenderMode = Literal["color", "alpha", "depth", "normals"]
+TrainingViewDepthRangeMode = Literal["percentile", "absolute"]
+
+TRAINING_VIEW_RENDER_MODE_LABELS: dict[TrainingViewRenderMode, str] = {
+    "color": "Color",
+    "alpha": "Alpha",
+    "depth": "Depth",
+    "normals": "Normals",
+}
+TRAINING_VIEW_RENDER_MODES: tuple[TrainingViewRenderMode, ...] = (
+    "color",
+    "alpha",
+    "depth",
+    "normals",
+)
 
 
 @dataclass(frozen=True)
@@ -236,11 +253,42 @@ _INSPECTOR_VALIDATION_VIEW_KEY = "__validation_view__"
 _INSPECTOR_SHOW_VALIDATION_KEY = "__show_validation__"
 _INSPECTOR_TRAINING_VIEW_KEY = "__training_view__"
 _INSPECTOR_SHOW_TRAINING_KEY = "__show_training__"
+_INSPECTOR_RENDER_MODE_KEY = "__render_mode__"
 _INSPECTOR_L1_RANGE_KEY = "__l1_range__"
+_INSPECTOR_SSIM_RANGE_KEY = "__ssim_range__"
+_INSPECTOR_ALPHA_RANGE_KEY = "__alpha_range__"
+_INSPECTOR_DEPTH_RANGE_KEY = "__depth_range__"
 
 
 class TrainingViewerCancelled(RuntimeError):
     """Raised inside the training thread when viewer training is cancelled."""
+
+
+def _validate_range_config(
+    name: str,
+    *,
+    bounds: tuple[float, float],
+    value: tuple[float, float],
+    step: float,
+) -> None:
+    lower, upper = sorted((float(bounds[0]), float(bounds[1])))
+    value_lower, value_upper = sorted((float(value[0]), float(value[1])))
+    if upper <= lower:
+        raise ValueError(f"{name}_bounds must span a positive interval.")
+    if step <= 0.0:
+        raise ValueError(f"{name}_step must be positive.")
+    if value_lower < lower or value_upper > upper:
+        raise ValueError(f"{name} must lie inside {name}_bounds.")
+
+
+def _range_control_value(
+    value: Any,
+    default: tuple[float, float],
+) -> tuple[float, float]:
+    if value is None:
+        return default
+    lower, upper = value
+    return float(lower), float(upper)
 
 
 @dataclass(frozen=True)
@@ -475,23 +523,55 @@ class TrainingViewInspectorConfig:
     """Notebook controls for fixed-view training inspection."""
 
     l1_range_bounds: tuple[float, float] = (0.0, 1.0)
-    l1_range: tuple[float, float] = (0.0, 0.25)
+    l1_range: tuple[float, float] = (0.0, 0.2)
     l1_range_step: float = 0.01
+    ssim_range_bounds: tuple[float, float] = (0.0, 1.0)
+    ssim_range: tuple[float, float] = (0.0, 0.2)
+    ssim_range_step: float = 0.01
+    alpha_range_bounds: tuple[float, float] = (0.0, 1.0)
+    alpha_range: tuple[float, float] = (0.0, 1.0)
+    alpha_range_step: float = 0.01
+    depth_range_mode: TrainingViewDepthRangeMode = "percentile"
+    depth_range_bounds: tuple[float, float] = (0.0, 100.0)
+    depth_range: tuple[float, float] = (0.0, 100.0)
+    depth_range_step: float = 1.0
+    render_mode: TrainingViewRenderMode = "color"
 
     def __post_init__(self) -> None:
         """Validate fixed-view inspector controls."""
-        lower, upper = sorted(
-            (float(self.l1_range_bounds[0]), float(self.l1_range_bounds[1]))
+        _validate_range_config(
+            "l1_range",
+            bounds=self.l1_range_bounds,
+            value=self.l1_range,
+            step=self.l1_range_step,
         )
-        value_lower, value_upper = sorted(
-            (float(self.l1_range[0]), float(self.l1_range[1]))
+        _validate_range_config(
+            "ssim_range",
+            bounds=self.ssim_range_bounds,
+            value=self.ssim_range,
+            step=self.ssim_range_step,
         )
-        if upper <= lower:
-            raise ValueError("l1_range_bounds must span a positive interval.")
-        if self.l1_range_step <= 0.0:
-            raise ValueError("l1_range_step must be positive.")
-        if value_lower < lower or value_upper > upper:
-            raise ValueError("l1_range must lie inside l1_range_bounds.")
+        _validate_range_config(
+            "alpha_range",
+            bounds=self.alpha_range_bounds,
+            value=self.alpha_range,
+            step=self.alpha_range_step,
+        )
+        _validate_range_config(
+            "depth_range",
+            bounds=self.depth_range_bounds,
+            value=self.depth_range,
+            step=self.depth_range_step,
+        )
+        if self.depth_range_mode not in {"percentile", "absolute"}:
+            raise ValueError(
+                "depth_range_mode must be 'percentile' or 'absolute'."
+            )
+        if self.render_mode not in TRAINING_VIEW_RENDER_MODES:
+            raise ValueError(
+                "render_mode must be one of "
+                f"{tuple(TRAINING_VIEW_RENDER_MODES)!r}."
+            )
 
 
 @dataclass(frozen=True)
@@ -546,15 +626,38 @@ class TrainingViewMapResult:
 
 
 @dataclass(frozen=True)
+class TrainingViewPreview:
+    """Rendered display image for one selected inspector preview mode."""
+
+    mode: TrainingViewRenderMode
+    label: str
+    image: UInt8[Tensor, " height width 3"]
+    min_value: float | None = None
+    max_value: float | None = None
+    mean_value: float | None = None
+
+
+@dataclass(frozen=True)
 class TrainingViewInspection:
     """Fixed-view render, target, L1 map, and custom map results."""
 
     target_image: UInt8[Tensor, " height width 3"]
     prediction_image: UInt8[Tensor, " height width 3"]
+    preview_image: UInt8[Tensor, " height width 3"]
+    preview_label: str
+    preview_min_value: float | None
+    preview_max_value: float | None
+    preview_mean_value: float | None
     l1_image: UInt8[Tensor, " height width 3"]
     l1_error: Float[Tensor, " height width"]
     l1_max: float
     l1_mean: float
+    ssim_image: UInt8[Tensor, " height width 3"]
+    ssim_error: Float[Tensor, " height width"]
+    ssim_max: float
+    ssim_mean: float
+    render_mode: TrainingViewRenderMode = "color"
+    available_render_modes: tuple[TrainingViewRenderMode, ...] = ("color",)
     maps: tuple[TrainingViewMapResult, ...] = ()
     render_step: int | None = None
     available: bool = True
@@ -570,7 +673,11 @@ class TrainingViewInspectorControls:
     show_validation_view_button: Any
     training_view_selector: Any
     show_training_view_button: Any
+    render_mode_selector: Any
     l1_range_slider: Any
+    ssim_range_slider: Any
+    alpha_range_slider: Any
+    depth_range_slider: Any
 
 
 class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
@@ -633,6 +740,32 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
             return self.config.l1_range
         lower, upper = value
         return float(lower), float(upper)
+
+    def ssim_value_range(self) -> tuple[float, float]:
+        """Return the selected SSIM-error visualization range."""
+        return _range_control_value(
+            self._control_value[_INSPECTOR_SSIM_RANGE_KEY],
+            self.config.ssim_range,
+        )
+
+    def alpha_value_range(self) -> tuple[float, float]:
+        """Return the selected alpha visualization range."""
+        return _range_control_value(
+            self._control_value[_INSPECTOR_ALPHA_RANGE_KEY],
+            self.config.alpha_range,
+        )
+
+    def depth_value_range(self) -> tuple[float, float]:
+        """Return the selected depth visualization range."""
+        return _range_control_value(
+            self._control_value[_INSPECTOR_DEPTH_RANGE_KEY],
+            self.config.depth_range,
+        )
+
+    def render_mode(self) -> TrainingViewRenderMode:
+        """Return the selected preview render mode."""
+        value = self._control_value[_INSPECTOR_RENDER_MODE_KEY]
+        return _normalize_render_mode(value, fallback=self.config.render_mode)
 
     def _current_frontend_value(self) -> dict[str, JSONType]:
         return {
@@ -713,6 +846,11 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
             frame_view_catalog,
             view_ref,
             value_range=self.l1_value_range(),
+            ssim_value_range=self.ssim_value_range(),
+            alpha_value_range=self.alpha_value_range(),
+            depth_value_range=self.depth_value_range(),
+            depth_range_mode=self.config.depth_range_mode,
+            render_mode=self.render_mode(),
             map_specs=map_specs,
         )
         return mo.vstack([self.controls.view, view], gap=0.75).style(
@@ -1011,6 +1149,11 @@ class TrainingViewerHandle:
         sample: PreparedFrameSample,
         *,
         value_range: tuple[float, float] | None = None,
+        ssim_value_range: tuple[float, float] | None = None,
+        alpha_value_range: tuple[float, float] | None = None,
+        depth_value_range: tuple[float, float] | None = None,
+        depth_range_mode: TrainingViewDepthRangeMode = "percentile",
+        render_mode: TrainingViewRenderMode = "color",
         map_specs: Sequence[TrainingViewMapSpec] = (),
     ) -> TrainingViewInspection:
         """Render one fixed dataset view from the latest training snapshot."""
@@ -1025,6 +1168,11 @@ class TrainingViewerHandle:
             sample,
             render_step=render_step,
             value_range=value_range,
+            ssim_value_range=ssim_value_range,
+            alpha_value_range=alpha_value_range,
+            depth_value_range=depth_value_range,
+            depth_range_mode=depth_range_mode,
+            render_mode=render_mode,
             map_specs=map_specs,
         )
         with self._lock:
@@ -1042,38 +1190,73 @@ class TrainingViewerHandle:
                 state,
                 camera,
             )
-        prediction = _display_image_as_float(prediction)
-        if prediction.shape != target.shape:
-            raise ValueError(
-                "Training view inspection requires prediction and target "
-                "images to have the same shape: "
-                f"got {tuple(prediction.shape)} and {tuple(target.shape)}."
+            prediction = _display_image_as_float(prediction)
+            if prediction.shape != target.shape:
+                raise ValueError(
+                    "Training view inspection requires prediction and target "
+                    "images to have the same shape: "
+                    f"got {tuple(prediction.shape)} and {tuple(target.shape)}."
+                )
+            l1_error = (prediction - target).abs().mean(dim=-1)
+            ssim_error = ssim_error_map(prediction, target)
+            available_modes = available_training_view_render_modes(
+                render_output,
+                prediction,
             )
-        l1_error = (prediction - target).abs().mean(dim=-1)
-        snapshot = self.snapshot()
-        context = TrainingViewMapContext(
-            sample=sample,
-            target=target,
-            prediction=prediction,
-            l1_error=l1_error,
-            render_output=render_output,
-            snapshot=snapshot,
-        )
-        inspection = TrainingViewInspection(
-            target_image=_display_image_to_uint8(target),
-            prediction_image=_display_image_to_uint8(prediction),
-            l1_image=viridis_error_map(
-                l1_error,
-                quantile=1.0,
-                value_range=value_range,
-            ),
-            l1_error=l1_error.detach().cpu(),
-            l1_max=float(l1_error.detach().amax().item()),
-            l1_mean=float(l1_error.detach().mean().item()),
-            maps=tuple(_render_map_spec(spec, context) for spec in map_specs),
-            render_step=render_step,
-            available=True,
-        )
+            resolved_render_mode = _select_render_mode(
+                render_mode, available_modes
+            )
+            preview = _training_view_preview(
+                resolved_render_mode,
+                prediction=prediction,
+                render_output=render_output,
+                alpha_value_range=alpha_value_range,
+                depth_value_range=depth_value_range,
+                depth_range_mode=depth_range_mode,
+            )
+            snapshot = self.snapshot()
+            context = TrainingViewMapContext(
+                sample=sample,
+                target=target,
+                prediction=prediction,
+                l1_error=l1_error,
+                render_output=render_output,
+                snapshot=snapshot,
+            )
+            l1_max, l1_mean = _scalar_max_mean(l1_error)
+            ssim_max, ssim_mean = _scalar_max_mean(ssim_error)
+            inspection = TrainingViewInspection(
+                target_image=_display_image_to_uint8(target),
+                prediction_image=_display_image_to_uint8(prediction),
+                preview_image=preview.image,
+                preview_label=preview.label,
+                preview_min_value=preview.min_value,
+                preview_max_value=preview.max_value,
+                preview_mean_value=preview.mean_value,
+                l1_image=viridis_error_map(
+                    l1_error,
+                    quantile=1.0,
+                    value_range=value_range,
+                ),
+                l1_error=l1_error.detach().cpu(),
+                l1_max=l1_max,
+                l1_mean=l1_mean,
+                ssim_image=viridis_error_map(
+                    ssim_error,
+                    quantile=1.0,
+                    value_range=ssim_value_range,
+                ),
+                ssim_error=ssim_error.detach().cpu(),
+                ssim_max=ssim_max,
+                ssim_mean=ssim_mean,
+                render_mode=resolved_render_mode,
+                available_render_modes=available_modes,
+                maps=tuple(
+                    _render_map_spec(spec, context) for spec in map_specs
+                ),
+                render_step=render_step,
+                available=True,
+            )
         with self._lock:
             self._inspection_cache_key = cache_key
             self._inspection_cache = inspection
@@ -1365,7 +1548,7 @@ def create_training_preparation(
     load_scene: Callable[[], Any],
     prepare_frame_view_catalog: Callable[[Any], Any],
     *,
-    title: str = "Preparing training inspector",
+    title: str = "Preparing training data",
 ) -> tuple[
     TrainingPreparationHandle,
     Callable[[], TrainingPreparationSnapshot],
@@ -1438,6 +1621,7 @@ def create_training_viewer(
 def create_training_view_inspector(
     frame_view_catalog: Any,
     *,
+    training_config: TrainingConfig | None = None,
     config: TrainingViewInspectorConfig | None = None,
 ) -> TrainingViewInspector:
     """Create reusable train/validation fixed-view notebook controls."""
@@ -1470,6 +1654,16 @@ def create_training_view_inspector(
         label="Show",
         full_width=True,
     )
+    render_mode_options = training_view_render_mode_options(training_config)
+    render_mode_selector = mo.ui.dropdown(
+        render_mode_options,
+        value=_render_mode_label_for_value(
+            inspector_config.render_mode,
+            render_mode_options,
+        ),
+        label="Render mode",
+        full_width=True,
+    )
     l1_start, l1_stop = sorted(
         (
             float(inspector_config.l1_range_bounds[0]),
@@ -1482,6 +1676,56 @@ def create_training_view_inspector(
         step=inspector_config.l1_range_step,
         value=tuple(sorted(inspector_config.l1_range)),
         label="L1 range",
+        show_value=True,
+        full_width=True,
+    )
+    ssim_start, ssim_stop = sorted(
+        (
+            float(inspector_config.ssim_range_bounds[0]),
+            float(inspector_config.ssim_range_bounds[1]),
+        )
+    )
+    ssim_range_slider = mo.ui.range_slider(
+        start=ssim_start,
+        stop=ssim_stop,
+        step=inspector_config.ssim_range_step,
+        value=tuple(sorted(inspector_config.ssim_range)),
+        label="SSIM error range",
+        show_value=True,
+        full_width=True,
+    )
+    alpha_start, alpha_stop = sorted(
+        (
+            float(inspector_config.alpha_range_bounds[0]),
+            float(inspector_config.alpha_range_bounds[1]),
+        )
+    )
+    alpha_range_slider = mo.ui.range_slider(
+        start=alpha_start,
+        stop=alpha_stop,
+        step=inspector_config.alpha_range_step,
+        value=tuple(sorted(inspector_config.alpha_range)),
+        label="Alpha range",
+        show_value=True,
+        full_width=True,
+    )
+    depth_start, depth_stop = sorted(
+        (
+            float(inspector_config.depth_range_bounds[0]),
+            float(inspector_config.depth_range_bounds[1]),
+        )
+    )
+    depth_range_label = (
+        "Depth percentile range"
+        if inspector_config.depth_range_mode == "percentile"
+        else "Depth range"
+    )
+    depth_range_slider = mo.ui.range_slider(
+        start=depth_start,
+        stop=depth_stop,
+        step=inspector_config.depth_range_step,
+        value=tuple(sorted(inspector_config.depth_range)),
+        label=depth_range_label,
         show_value=True,
         full_width=True,
     )
@@ -1498,7 +1742,11 @@ def create_training_view_inspector(
             align="end",
             gap=0.75,
         ),
+        render_mode_selector,
         l1_range_slider,
+        ssim_range_slider,
+        alpha_range_slider,
+        depth_range_slider,
     ]
     controls_view = mo.vstack(
         controls,
@@ -1512,14 +1760,22 @@ def create_training_view_inspector(
             show_validation_view_button=show_validation_view_button,
             training_view_selector=training_view_selector,
             show_training_view_button=show_training_view_button,
+            render_mode_selector=render_mode_selector,
             l1_range_slider=l1_range_slider,
+            ssim_range_slider=ssim_range_slider,
+            alpha_range_slider=alpha_range_slider,
+            depth_range_slider=depth_range_slider,
         ),
         elements={
             _INSPECTOR_VALIDATION_VIEW_KEY: validation_view_selector,
             _INSPECTOR_SHOW_VALIDATION_KEY: show_validation_view_button,
             _INSPECTOR_TRAINING_VIEW_KEY: training_view_selector,
             _INSPECTOR_SHOW_TRAINING_KEY: show_training_view_button,
+            _INSPECTOR_RENDER_MODE_KEY: render_mode_selector,
             _INSPECTOR_L1_RANGE_KEY: l1_range_slider,
+            _INSPECTOR_SSIM_RANGE_KEY: ssim_range_slider,
+            _INSPECTOR_ALPHA_RANGE_KEY: alpha_range_slider,
+            _INSPECTOR_DEPTH_RANGE_KEY: depth_range_slider,
         },
     )
 
@@ -1530,6 +1786,11 @@ def render_training_view_inspector(
     view_ref: Any | None,
     *,
     value_range: tuple[float, float] | None = None,
+    ssim_value_range: tuple[float, float] | None = None,
+    alpha_value_range: tuple[float, float] | None = None,
+    depth_value_range: tuple[float, float] | None = None,
+    depth_range_mode: TrainingViewDepthRangeMode = "percentile",
+    render_mode: TrainingViewRenderMode = "color",
     map_specs: Sequence[TrainingViewMapSpec] = (),
 ) -> Any:
     """Render the selected fixed-view inspection panel as marimo output."""
@@ -1542,6 +1803,11 @@ def render_training_view_inspector(
         inspection = handle.inspect_view(
             sample,
             value_range=value_range,
+            ssim_value_range=ssim_value_range,
+            alpha_value_range=alpha_value_range,
+            depth_value_range=depth_value_range,
+            depth_range_mode=depth_range_mode,
+            render_mode=render_mode,
             map_specs=map_specs,
         )
     except Exception as error:
@@ -1560,8 +1826,8 @@ def render_training_view_inspector(
             caption=f"{view_ref.label} | GT",
         ),
         mo.image(
-            inspection.prediction_image.numpy(),
-            caption=f"{view_ref.label} | rendered | {status_text}",
+            inspection.preview_image.numpy(),
+            caption=_preview_caption(view_ref.label, inspection, status_text),
         ),
         mo.image(
             inspection.l1_image.numpy(),
@@ -1571,6 +1837,16 @@ def render_training_view_inspector(
             ),
         ),
     ]
+    if inspection.ssim_image.numel() > 0:
+        images.append(
+            mo.image(
+                inspection.ssim_image.numpy(),
+                caption=(
+                    f"DSSIM mean {inspection.ssim_mean:.5f} | "
+                    f"max {inspection.ssim_max:.5f}"
+                ),
+            )
+        )
     images.extend(
         mo.image(
             result.image.numpy(),
@@ -1913,10 +2189,19 @@ def _placeholder_inspection(
     return TrainingViewInspection(
         target_image=_display_image_to_uint8(sample.image),
         prediction_image=placeholder,
+        preview_image=placeholder,
+        preview_label="Color",
+        preview_min_value=None,
+        preview_max_value=None,
+        preview_mean_value=None,
         l1_image=placeholder,
         l1_error=torch.zeros((height, width), dtype=torch.float32),
         l1_max=0.0,
         l1_mean=0.0,
+        ssim_image=placeholder,
+        ssim_error=torch.zeros((height, width), dtype=torch.float32),
+        ssim_max=0.0,
+        ssim_mean=0.0,
         render_step=None,
         available=False,
     )
@@ -1939,8 +2224,312 @@ def _render_prediction(
             image = getattr(render_output, "render", render_output)
             if image.ndim == 4:
                 image = image[0]
-            image = _sanitize_display_image(image.detach())
+        image = _sanitize_display_image(image.detach())
     return render_output, image
+
+
+def training_view_render_modes_for_config(
+    training_config: TrainingConfig | None,
+) -> tuple[TrainingViewRenderMode, ...]:
+    """Return preview modes requested by the current training render config."""
+    if training_config is None:
+        return ("color",)
+    render_config = training_config.render
+    backend = BACKEND_REGISTRY.get(render_config.backend)
+    supported_outputs = None if backend is None else backend.supported_outputs
+
+    def supports(output: str) -> bool:
+        return supported_outputs is None or output in supported_outputs
+
+    modes: list[TrainingViewRenderMode] = ["color"]
+    if bool(getattr(render_config, "return_alpha", False)) and supports(
+        "alpha"
+    ):
+        modes.append("alpha")
+    if bool(getattr(render_config, "return_depth", False)) and supports(
+        "depth"
+    ):
+        modes.append("depth")
+    if bool(getattr(render_config, "return_normals", False)) and supports(
+        "normals"
+    ):
+        modes.append("normals")
+    return tuple(modes)
+
+
+def training_view_render_mode_options(
+    training_config: TrainingConfig | None,
+) -> dict[str, str]:
+    """Return marimo dropdown options for the configured preview modes."""
+    modes = training_view_render_modes_for_config(training_config)
+    return {TRAINING_VIEW_RENDER_MODE_LABELS[mode]: mode for mode in modes}
+
+
+def available_training_view_render_modes(
+    render_output: Any,
+    prediction: Tensor,
+) -> tuple[TrainingViewRenderMode, ...]:
+    """Return preview modes present on a concrete render output."""
+    modes: list[TrainingViewRenderMode] = []
+    if _is_rgb_image(prediction):
+        modes.append("color")
+    if _output_tensor(render_output, "alphas") is not None:
+        modes.append("alpha")
+    if _output_tensor(render_output, "depth") is not None:
+        modes.append("depth")
+    normals = _output_tensor(render_output, "normals")
+    if (
+        normals is not None
+        and normals.ndim >= 3
+        and int(normals.shape[-1]) == 3
+    ):
+        modes.append("normals")
+    return tuple(modes) or ("color",)
+
+
+def ssim_error_map(
+    prediction: Float[Tensor, " height width channels"],
+    target: Float[Tensor, " height width channels"],
+) -> Float[Tensor, " valid_height valid_width"]:
+    """Return a valid-window DSSIM map for two NHWC RGB images."""
+    if prediction.shape != target.shape:
+        raise ValueError(
+            "SSIM error map expects prediction and target to share NHWC shape, "
+            f"got {tuple(prediction.shape)} and {tuple(target.shape)}."
+        )
+    if prediction.ndim != 3 or int(prediction.shape[-1]) != 3:
+        raise ValueError(
+            "SSIM error map expects one HWC RGB image, got "
+            f"shape {tuple(prediction.shape)}."
+        )
+    height, width = int(prediction.shape[0]), int(prediction.shape[1])
+    if height < 11 or width < 11:
+        return prediction.new_empty((max(height - 10, 0), max(width - 10, 0)))
+
+    pred = prediction.to(torch.float32).clamp(0.0, 1.0)
+    tgt = target.to(torch.float32).clamp(0.0, 1.0)
+    pred_nchw = pred.permute(2, 0, 1).unsqueeze(0).contiguous()
+    tgt_nchw = tgt.permute(2, 0, 1).unsqueeze(0).contiguous()
+    channels = int(pred_nchw.shape[1])
+    window = _ssim_window(channels, device=pred.device, dtype=pred.dtype)
+    mu_pred = F.conv2d(pred_nchw, window, groups=channels)
+    mu_tgt = F.conv2d(tgt_nchw, window, groups=channels)
+    mu_pred_sq = mu_pred.square()
+    mu_tgt_sq = mu_tgt.square()
+    mu_pred_tgt = mu_pred * mu_tgt
+    sigma_pred_sq = (
+        F.conv2d(pred_nchw.square(), window, groups=channels) - mu_pred_sq
+    )
+    sigma_tgt_sq = (
+        F.conv2d(tgt_nchw.square(), window, groups=channels) - mu_tgt_sq
+    )
+    sigma_pred_tgt = (
+        F.conv2d(pred_nchw * tgt_nchw, window, groups=channels) - mu_pred_tgt
+    )
+    c1 = 0.01**2
+    c2 = 0.03**2
+    numerator = (2.0 * mu_pred_tgt + c1) * (2.0 * sigma_pred_tgt + c2)
+    denominator = (mu_pred_sq + mu_tgt_sq + c1) * (
+        sigma_pred_sq + sigma_tgt_sq + c2
+    )
+    ssim = numerator / denominator.clamp_min(1.0e-12)
+    dssim = (1.0 - ssim.mean(dim=1)[0]) / 2.0
+    return torch.nan_to_num(dssim, nan=0.0, posinf=1.0, neginf=0.0).clamp(
+        0.0,
+        1.0,
+    )
+
+
+def _ssim_window(
+    channels: int,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> Tensor:
+    coords = torch.arange(11, device=device, dtype=dtype) - 5.0
+    weights_1d = torch.exp(-(coords.square()) / (2.0 * 1.5**2))
+    weights_1d = weights_1d / weights_1d.sum().clamp_min(1.0e-12)
+    weights_2d = weights_1d[:, None] * weights_1d[None, :]
+    return weights_2d.reshape(1, 1, 11, 11).repeat(channels, 1, 1, 1)
+
+
+def _render_mode_label_for_value(
+    mode: TrainingViewRenderMode,
+    options: dict[str, str],
+) -> str:
+    for label, value in options.items():
+        if value == mode:
+            return label
+    return _first_option_label(options)
+
+
+def _normalize_render_mode(
+    value: Any,
+    *,
+    fallback: TrainingViewRenderMode = "color",
+) -> TrainingViewRenderMode:
+    if value in TRAINING_VIEW_RENDER_MODES:
+        return value
+    if fallback in TRAINING_VIEW_RENDER_MODES:
+        return fallback
+    return "color"
+
+
+def _select_render_mode(
+    mode: TrainingViewRenderMode,
+    available_modes: tuple[TrainingViewRenderMode, ...],
+) -> TrainingViewRenderMode:
+    if mode in available_modes:
+        return mode
+    if "color" in available_modes:
+        return "color"
+    return available_modes[0]
+
+
+def _training_view_preview(
+    mode: TrainingViewRenderMode,
+    *,
+    prediction: Tensor,
+    render_output: Any,
+    alpha_value_range: tuple[float, float] | None,
+    depth_value_range: tuple[float, float] | None,
+    depth_range_mode: TrainingViewDepthRangeMode,
+) -> TrainingViewPreview:
+    if mode == "alpha":
+        values = _first_scalar_image(_output_tensor(render_output, "alphas"))
+        if values is not None:
+            return _scalar_preview(
+                "alpha",
+                values,
+                value_range=alpha_value_range or (0.0, 1.0),
+            )
+    if mode == "depth":
+        values = _first_scalar_image(_output_tensor(render_output, "depth"))
+        if values is not None:
+            return _scalar_preview(
+                "depth",
+                values,
+                value_range=_depth_display_range(
+                    values,
+                    depth_value_range or (0.0, 100.0),
+                    mode=depth_range_mode,
+                ),
+            )
+    if mode == "normals":
+        normals = _first_rgb_image(_output_tensor(render_output, "normals"))
+        if normals is not None:
+            image = _display_image_to_uint8(
+                (normals.to(torch.float32) + 1.0) * 0.5
+            )
+            return TrainingViewPreview(
+                mode="normals",
+                label=TRAINING_VIEW_RENDER_MODE_LABELS["normals"],
+                image=image,
+            )
+    return TrainingViewPreview(
+        mode="color",
+        label=TRAINING_VIEW_RENDER_MODE_LABELS["color"],
+        image=_display_image_to_uint8(prediction),
+    )
+
+
+def _scalar_preview(
+    mode: TrainingViewRenderMode,
+    values: Tensor,
+    *,
+    value_range: tuple[float, float],
+) -> TrainingViewPreview:
+    min_value, max_value, mean_value = _scalar_min_max_mean(values)
+    return TrainingViewPreview(
+        mode=mode,
+        label=TRAINING_VIEW_RENDER_MODE_LABELS[mode],
+        image=viridis_error_map(values, quantile=1.0, value_range=value_range),
+        min_value=min_value,
+        max_value=max_value,
+        mean_value=mean_value,
+    )
+
+
+def _depth_display_range(
+    values: Tensor,
+    selected_range: tuple[float, float],
+    *,
+    mode: TrainingViewDepthRangeMode,
+) -> tuple[float, float]:
+    lower, upper = sorted((float(selected_range[0]), float(selected_range[1])))
+    if mode == "absolute":
+        return _positive_span(lower, upper)
+    finite = values.detach().to(torch.float32)
+    finite = finite[torch.isfinite(finite)]
+    if finite.numel() == 0:
+        return (0.0, 1.0)
+    lower_q = max(0.0, min(100.0, lower)) / 100.0
+    upper_q = max(0.0, min(100.0, upper)) / 100.0
+    if upper_q <= lower_q:
+        upper_q = min(1.0, lower_q + 0.01)
+    quantiles = torch.tensor(
+        [lower_q, upper_q],
+        dtype=finite.dtype,
+        device=finite.device,
+    )
+    resolved = torch.quantile(finite, quantiles)
+    return _positive_span(float(resolved[0].item()), float(resolved[1].item()))
+
+
+def _positive_span(lower: float, upper: float) -> tuple[float, float]:
+    if upper <= lower:
+        upper = lower + 1.0e-8
+    return lower, upper
+
+
+def _output_tensor(render_output: Any, name: str) -> Tensor | None:
+    value = getattr(render_output, name, None)
+    return value if isinstance(value, Tensor) else None
+
+
+def _first_scalar_image(value: Tensor | None) -> Tensor | None:
+    if value is None:
+        return None
+    if value.ndim == 2:
+        return value
+    if value.ndim == 3:
+        return value[0]
+    if value.ndim == 4 and int(value.shape[-1]) == 1:
+        return value[0, ..., 0]
+    return None
+
+
+def _first_rgb_image(value: Tensor | None) -> Tensor | None:
+    if value is None:
+        return None
+    if value.ndim == 3 and int(value.shape[-1]) == 3:
+        return value
+    if value.ndim == 4 and int(value.shape[-1]) == 3:
+        return value[0]
+    return None
+
+
+def _is_rgb_image(value: Tensor) -> bool:
+    return value.ndim == 3 and int(value.shape[-1]) == 3
+
+
+def _scalar_min_max_mean(
+    values: Tensor,
+) -> tuple[float | None, float | None, float | None]:
+    finite = values.detach().to(torch.float32)
+    finite = finite[torch.isfinite(finite)]
+    if finite.numel() == 0:
+        return None, None, None
+    return (
+        float(finite.amin().item()),
+        float(finite.amax().item()),
+        float(finite.mean().item()),
+    )
+
+
+def _scalar_max_mean(values: Tensor) -> tuple[float, float]:
+    _min_value, max_value, mean_value = _scalar_min_max_mean(values)
+    return max_value or 0.0, mean_value or 0.0
 
 
 def _render_map_spec(
@@ -1986,6 +2575,11 @@ def _inspection_cache_key(
     *,
     render_step: int | None,
     value_range: tuple[float, float] | None,
+    ssim_value_range: tuple[float, float] | None,
+    alpha_value_range: tuple[float, float] | None,
+    depth_value_range: tuple[float, float] | None,
+    depth_range_mode: TrainingViewDepthRangeMode,
+    render_mode: TrainingViewRenderMode,
     map_specs: Sequence[TrainingViewMapSpec],
 ) -> tuple[Any, ...]:
     frame = sample.frame
@@ -2004,6 +2598,11 @@ def _inspection_cache_key(
         tuple(sample.image.shape),
         render_step,
         value_range,
+        ssim_value_range,
+        alpha_value_range,
+        depth_value_range,
+        depth_range_mode,
+        render_mode,
         map_key,
     )
 
@@ -2033,6 +2632,23 @@ def _map_caption(result: TrainingViewMapResult) -> str:
     return (
         f"{result.label} | mean {result.mean_value:.5f} | "
         f"max {result.max_value:.5f}"
+    )
+
+
+def _preview_caption(
+    view_label: str,
+    inspection: TrainingViewInspection,
+    status_text: str,
+) -> str:
+    base = f"{view_label} | {inspection.preview_label} | {status_text}"
+    if (
+        inspection.preview_mean_value is None
+        or inspection.preview_max_value is None
+    ):
+        return base
+    return (
+        f"{base} | mean {inspection.preview_mean_value:.5f} | "
+        f"max {inspection.preview_max_value:.5f}"
     )
 
 
@@ -2204,8 +2820,11 @@ def _dc_only_model_for_render(model: Any) -> Any:
 
 
 __all__ = [
+    "TRAINING_VIEW_RENDER_MODES",
+    "TRAINING_VIEW_RENDER_MODE_LABELS",
     "TrainingPreparationHandle",
     "TrainingPreparationSnapshot",
+    "TrainingViewDepthRangeMode",
     "TrainingViewInspection",
     "TrainingViewInspector",
     "TrainingViewInspectorConfig",
@@ -2213,19 +2832,25 @@ __all__ = [
     "TrainingViewMapContext",
     "TrainingViewMapResult",
     "TrainingViewMapSpec",
+    "TrainingViewPreview",
+    "TrainingViewRenderMode",
     "TrainingViewerConfig",
     "TrainingViewerErrorMap",
     "TrainingViewerHandle",
     "TrainingViewerHook",
     "TrainingViewerSnapshot",
     "TrainingViserViewerConfig",
+    "available_training_view_render_modes",
     "create_training_preparation",
     "create_training_run",
     "create_training_view_inspector",
     "create_training_viewer",
     "render_training_preparation_status",
     "render_training_view_inspector",
+    "ssim_error_map",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_view_render_mode_options",
+    "training_view_render_modes_for_config",
     "viridis_error_map",
 ]

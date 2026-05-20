@@ -50,12 +50,13 @@ class InitializedModel:
         )
 
 
-def _build_sh_features(
+def build_sh_features(
     point_cloud: PointCloudState,
     *,
     sh_degree: int,
     default_color: tuple[float, float, float],
 ) -> Float[Tensor, "num_points sh_coeffs 3"]:
+    """Build initialized spherical-harmonic features for a point cloud."""
     num_points = int(point_cloud.points.shape[0])
     sh_coeffs = (sh_degree + 1) ** 2
     feature = torch.zeros((num_points, sh_coeffs, 3), dtype=torch.float32)
@@ -66,10 +67,11 @@ def _build_sh_features(
     return feature
 
 
-def _require_point_cloud(
+def require_point_cloud(
     scene_record: SceneRecord,
     explicit_point_cloud: PointCloudState | None,
 ) -> PointCloudState:
+    """Return an explicit or scene-record point cloud, or raise."""
     point_cloud = explicit_point_cloud or scene_record.point_cloud
     if point_cloud is None:
         raise ValueError(
@@ -89,7 +91,7 @@ def initialize_gaussian_scene_from_scene_record(
     point_cloud: PointCloudState | None = None,
 ) -> GaussianScene3D:
     """Build a GaussianScene3D from an SfM point cloud."""
-    resolved_point_cloud = _require_point_cloud(scene_record, point_cloud)
+    resolved_point_cloud = require_point_cloud(scene_record, point_cloud)
     centers = resolved_point_cloud.points.to(torch.float32)
     num_points = int(centers.shape[0])
     log_scales = torch.full(
@@ -102,7 +104,7 @@ def initialize_gaussian_scene_from_scene_record(
     opacity = torch.full((num_points,), initial_opacity, dtype=torch.float32)
     opacity = opacity.clamp(1e-5, 1.0 - 1e-5)
     logit_opacity = torch.logit(opacity)
-    feature = _build_sh_features(
+    feature = build_sh_features(
         resolved_point_cloud,
         sh_degree=sh_degree,
         default_color=default_color,
