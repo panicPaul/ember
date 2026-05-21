@@ -710,6 +710,7 @@ all = [
     { name = "ember-native-powerfoam" },
     { name = "ember-native-radfoam" },
     { name = "ember-native-svraster" },
+    { name = "ember-native-triangle-splatting" },
     { name = "ember-splatting-training" },
     { name = "ember-svraster-training" },
 ]
@@ -724,6 +725,7 @@ all-native = [
     { name = "ember-native-powerfoam" },
     { name = "ember-native-radfoam" },
     { name = "ember-native-svraster" },
+    { name = "ember-native-triangle-splatting" },
     { name = "ember-splatting-training" },
     { name = "ember-svraster-training" },
 ]
@@ -735,6 +737,7 @@ all-unrestricted = [
     { name = "ember-native-nht" },
     { name = "ember-native-powerfoam" },
     { name = "ember-native-radfoam" },
+    { name = "ember-native-triangle-splatting" },
     { name = "ember-splatting-training" },
 ]
 cu128 = [
@@ -749,6 +752,7 @@ cu128-dev = [
     { name = "ember-native-powerfoam" },
     { name = "ember-native-radfoam" },
     { name = "ember-native-svraster" },
+    { name = "ember-native-triangle-splatting" },
     { name = "ember-splatting-training" },
     { name = "ember-svraster-training" },
     { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" } },
@@ -765,6 +769,7 @@ cu130-dev = [
     { name = "ember-native-powerfoam" },
     { name = "ember-native-radfoam" },
     { name = "ember-native-svraster" },
+    { name = "ember-native-triangle-splatting" },
     { name = "ember-splatting-training" },
     { name = "ember-svraster-training" },
     { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" } },
@@ -789,6 +794,9 @@ native-radfoam = [
 ]
 native-svraster = [
     { name = "ember-native-svraster" },
+]
+native-triangle-splatting = [
+    { name = "ember-native-triangle-splatting" },
 ]
 splatting-training = [
     { name = "ember-splatting-training" },
@@ -852,6 +860,12 @@ requires-dist = [
     { name = "ember-native-svraster", marker = "extra == 'cu128-dev'", editable = "packages/ember-native-svraster" },
     { name = "ember-native-svraster", marker = "extra == 'cu130-dev'", editable = "packages/ember-native-svraster" },
     { name = "ember-native-svraster", marker = "extra == 'native-svraster'", editable = "packages/ember-native-svraster" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'all'", editable = "packages/ember-native-triangle-splatting" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'all-native'", editable = "packages/ember-native-triangle-splatting" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'all-unrestricted'", editable = "packages/ember-native-triangle-splatting" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'cu128-dev'", editable = "packages/ember-native-triangle-splatting" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'cu130-dev'", editable = "packages/ember-native-triangle-splatting" },
+    { name = "ember-native-triangle-splatting", marker = "extra == 'native-triangle-splatting'", editable = "packages/ember-native-triangle-splatting" },
     { name = "ember-splatting-training", marker = "extra == 'all'", editable = "packages/ember-splatting-training" },
     { name = "ember-splatting-training", marker = "extra == 'all-native'", editable = "packages/ember-splatting-training" },
     { name = "ember-splatting-training", marker = "extra == 'all-unrestricted'", editable = "packages/ember-splatting-training" },
@@ -881,7 +895,7 @@ requires-dist = [
     { name = "torch", marker = "extra == 'cu130-dev'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "ember-dev-environment", extra = "cu130-dev" } },
     { name = "ty", specifier = ">=0.0.29" },
 ]
-provides-extras = ["adapter-backends", "adapter-nht", "native-faster-gs", "native-faster-gs-mojo", "native-3dgrt", "native-nht", "native-powerfoam", "native-radfoam", "native-svraster", "svraster-adapter", "svraster-training", "splatting-training", "all-backends", "all-native", "all-unrestricted", "all", "cu128", "cu130", "cu128-dev", "cu130-dev"]
+provides-extras = ["adapter-backends", "adapter-nht", "native-faster-gs", "native-faster-gs-mojo", "native-3dgrt", "native-nht", "native-powerfoam", "native-radfoam", "native-svraster", "native-triangle-splatting", "svraster-adapter", "svraster-training", "splatting-training", "all-backends", "all-native", "all-unrestricted", "all", "cu128", "cu130", "cu128-dev", "cu130-dev"]
 
 [[package]]
 name = "ember-native-3dgrt"
@@ -1057,6 +1071,29 @@ requires-dist = [
     { name = "torch", specifier = ">=2.11.0" },
     { name = "torch", marker = "extra == 'cu128'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "ember-native-svraster", extra = "cu128" } },
     { name = "torch", marker = "extra == 'cu130'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "ember-native-svraster", extra = "cu130" } },
+]
+provides-extras = ["all", "cu128", "cu130"]
+
+[[package]]
+name = "ember-native-triangle-splatting"
+source = { editable = "packages/ember-native-triangle-splatting" }
+dependencies = [
+    { name = "beartype" },
+    { name = "ember-core" },
+    { name = "jaxtyping" },
+    { name = "torch", version = "2.11.0", source = { registry = "https://pypi.org/simple" }, marker = "(extra == 'extra-21-ember-dev-environment-cu128' and extra == 'extra-21-ember-dev-environment-cu130') or (extra == 'extra-21-ember-dev-environment-cu128' and extra == 'extra-21-ember-dev-environment-cu130-dev') or (extra == 'extra-21-ember-dev-environment-cu128-dev' and extra == 'extra-21-ember-dev-environment-cu130') or (extra == 'extra-21-ember-dev-environment-cu128-dev' and extra == 'extra-21-ember-dev-environment-cu130-dev') or (extra != 'extra-21-ember-dev-environment-cu128' and extra != 'extra-21-ember-dev-environment-cu128-dev' and extra != 'extra-21-ember-dev-environment-cu130' and extra != 'extra-21-ember-dev-environment-cu130-dev')" },
+    { name = "torch", version = "2.11.0+cu128", source = { registry = "https://download.pytorch.org/whl/cu128" }, marker = "extra == 'extra-21-ember-dev-environment-cu128' or extra == 'extra-21-ember-dev-environment-cu128-dev'" },
+    { name = "torch", version = "2.11.0+cu130", source = { registry = "https://download.pytorch.org/whl/cu130" }, marker = "extra == 'extra-21-ember-dev-environment-cu130' or extra == 'extra-21-ember-dev-environment-cu130-dev'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "beartype", specifier = ">=0.22.9" },
+    { name = "ember-core", editable = "packages/ember-core" },
+    { name = "jaxtyping", specifier = ">=0.3.9" },
+    { name = "torch", specifier = ">=2.11.0" },
+    { name = "torch", marker = "extra == 'cu128'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu128", conflict = { package = "ember-native-triangle-splatting", extra = "cu128" } },
+    { name = "torch", marker = "extra == 'cu130'", specifier = ">=2.11.0", index = "https://download.pytorch.org/whl/cu130", conflict = { package = "ember-native-triangle-splatting", extra = "cu130" } },
 ]
 provides-extras = ["all", "cu128", "cu130"]
 

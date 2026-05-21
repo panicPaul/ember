@@ -396,6 +396,240 @@ class GaussianScene2D(GaussianScene):
         return 2
 
 
+class TriangleSplattingScene(Scene):
+    """Canonical Triangle Splatting scene contract."""
+
+    parameter_field_names: ClassVar[tuple[str, ...]] = (
+        "triangle_vertices",
+        "raw_sigma",
+        "logit_opacity",
+        "features_dc",
+        "features_rest",
+        "mask_logits",
+    )
+    buffer_field_names: ClassVar[tuple[str, ...]] = (
+        "vertices_per_triangle",
+        "triangle_vertex_offsets",
+    )
+    metadata_field_names: ClassVar[tuple[str, ...]] = (
+        "sh_degree",
+        "active_sh_degree",
+    )
+    topology_field_names: ClassVar[tuple[str, ...]] = (
+        parameter_field_names + buffer_field_names
+    )
+
+    def __init__(
+        self,
+        *,
+        triangle_vertices: Float[
+            Tensor,
+            "num_triangles vertices_per_triangle 3",
+        ],
+        raw_sigma: Float[Tensor, "num_triangles 1"],
+        logit_opacity: Float[Tensor, "num_triangles 1"],
+        features_dc: Float[Tensor, "num_triangles 1 3"],
+        features_rest: Float[Tensor, "num_triangles rest_sh_coeffs 3"],
+        mask_logits: Float[Tensor, "num_triangles 1"] | None = None,
+        vertices_per_triangle: Int[Tensor, " num_triangles"] | None = None,
+        triangle_vertex_offsets: Int[Tensor, " num_triangles"] | None = None,
+        sh_degree: int,
+        active_sh_degree: int = 0,
+    ) -> None:
+        super().__init__()
+        self.sh_degree = sh_degree
+        self.active_sh_degree = active_sh_degree
+        num_triangles = int(triangle_vertices.shape[0])
+        vertices_per_triangle = (
+            self.full_vertices_per_triangle(triangle_vertices)
+            if vertices_per_triangle is None
+            else vertices_per_triangle
+        )
+        triangle_vertex_offsets = (
+            self.vertex_offsets(vertices_per_triangle)
+            if triangle_vertex_offsets is None
+            else triangle_vertex_offsets
+        )
+        mask_logits = (
+            torch.ones(
+                (num_triangles, 1),
+                dtype=triangle_vertices.dtype,
+                device=triangle_vertices.device,
+            )
+            if mask_logits is None
+            else mask_logits
+        )
+        self.register_parameter(
+            "triangle_vertices",
+            self._to_parameter(triangle_vertices),
+        )
+        self.register_parameter("raw_sigma", self._to_parameter(raw_sigma))
+        self.register_parameter(
+            "logit_opacity",
+            self._to_parameter(logit_opacity),
+        )
+        self.register_parameter(
+            "features_dc",
+            self._to_parameter(features_dc),
+        )
+        self.register_parameter(
+            "features_rest",
+            self._to_parameter(features_rest),
+        )
+        self.register_parameter(
+            "mask_logits",
+            self._to_parameter(mask_logits),
+        )
+        self.register_buffer("vertices_per_triangle", vertices_per_triangle)
+        self.register_buffer(
+            "triangle_vertex_offsets",
+            triangle_vertex_offsets,
+        )
+        self.validate()
+
+    @property
+    def scene_family(self) -> SceneFamily:
+        """Return the Triangle Splatting scene family tag."""
+        return "triangle_splatting"
+
+    @property
+    def num_triangles(self) -> int:
+        """Return the number of triangle primitives."""
+        return int(self.triangle_vertices.shape[0])
+
+    @property
+    def flattened_triangle_vertices(
+        self,
+    ) -> Float[Tensor, "num_vertices 3"]:
+        """Return triangle vertices in the native flattened layout."""
+        return self.triangle_vertices.flatten(0, 1)
+
+    @property
+    def sigma(self) -> Float[Tensor, "num_triangles 1"]:
+        """Return activated triangle blur sigma values."""
+        return 0.01 + torch.exp(self.raw_sigma)
+
+    @property
+    def opacity(self) -> Float[Tensor, "num_triangles 1"]:
+        """Return activated triangle opacity values."""
+        return torch.sigmoid(self.logit_opacity)
+
+    @property
+    def masked_opacity(self) -> Float[Tensor, "num_triangles 1"]:
+        """Return opacity after the upstream mask gate."""
+        mask = torch.sigmoid(self.mask_logits)
+        gated = ((mask > 0.01).float() - mask).detach() + mask
+        return self.opacity * gated
+
+    @property
+    def features(self) -> Float[Tensor, "num_triangles sh_coeffs 3"]:
+        """Return concatenated spherical-harmonic features."""
+        return torch.cat((self.features_dc, self.features_rest), dim=1)
+
+    @staticmethod
+    def _to_parameter(value: Tensor) -> nn.Parameter:
+        if isinstance(value, nn.Parameter):
+            return value
+        return nn.Parameter(value, requires_grad=value.requires_grad)
+
+    @staticmethod
+    def full_vertices_per_triangle(
+        triangle_vertices: Tensor,
+    ) -> Int[Tensor, " num_triangles"]:
+        """Build constant per-triangle vertex counts for dense triangles."""
+        return torch.full(
+            (int(triangle_vertices.shape[0]),),
+            int(triangle_vertices.shape[1]),
+            dtype=torch.int32,
+            device=triangle_vertices.device,
+        )
+
+    @staticmethod
+    def vertex_offsets(
+        vertices_per_triangle: Tensor,
+    ) -> Int[Tensor, " num_triangles"]:
+        """Build cumsum offsets into the flattened vertex tensor."""
+        if int(vertices_per_triangle.shape[0]) == 0:
+            return torch.empty(
+                (0,),
+                dtype=torch.int32,
+                device=vertices_per_triangle.device,
+            )
+        prefix = torch.zeros(
+            (1,),
+            dtype=vertices_per_triangle.dtype,
+            device=vertices_per_triangle.device,
+        )
+        return torch.cumsum(
+            torch.cat([prefix, vertices_per_triangle[:-1]], dim=0),
+            dim=0,
+        ).to(torch.int32)
+
+    def validate(self) -> None:
+        """Validate Triangle Splatting scene tensor shapes and metadata."""
+        if self.sh_degree < 0:
+            raise ValueError("TriangleSplattingScene.sh_degree must be >= 0.")
+        if self.active_sh_degree < 0 or self.active_sh_degree > self.sh_degree:
+            raise ValueError(
+                "TriangleSplattingScene.active_sh_degree must be between "
+                "0 and sh_degree."
+            )
+        if (
+            self.triangle_vertices.ndim != 3
+            or self.triangle_vertices.shape[-1] != 3
+        ):
+            raise ValueError(
+                "TriangleSplattingScene.triangle_vertices must have shape "
+                "(num_triangles, vertices_per_triangle, 3); got "
+                f"{tuple(self.triangle_vertices.shape)}."
+            )
+        num_triangles = int(self.triangle_vertices.shape[0])
+        vertices_per_primitive = int(self.triangle_vertices.shape[1])
+        if vertices_per_primitive < 3:
+            raise ValueError(
+                "TriangleSplattingScene requires at least three vertices per "
+                f"primitive; got {vertices_per_primitive}."
+            )
+        expected_scalar_shape = (num_triangles, 1)
+        for name in ("raw_sigma", "logit_opacity", "mask_logits"):
+            value = getattr(self, name)
+            if value.shape != expected_scalar_shape:
+                raise ValueError(
+                    f"TriangleSplattingScene.{name} must have shape "
+                    f"{expected_scalar_shape}; got {tuple(value.shape)}."
+                )
+        if self.features_dc.shape != (num_triangles, 1, 3):
+            raise ValueError(
+                "TriangleSplattingScene.features_dc must have shape "
+                f"({num_triangles}, 1, 3); got "
+                f"{tuple(self.features_dc.shape)}."
+            )
+        expected_rest_coeffs = (self.sh_degree + 1) ** 2 - 1
+        if self.features_rest.shape != (num_triangles, expected_rest_coeffs, 3):
+            raise ValueError(
+                "TriangleSplattingScene.features_rest must have shape "
+                f"({num_triangles}, {expected_rest_coeffs}, 3); got "
+                f"{tuple(self.features_rest.shape)}."
+            )
+        if self.vertices_per_triangle.shape != (num_triangles,):
+            raise ValueError(
+                "TriangleSplattingScene.vertices_per_triangle must have shape "
+                f"({num_triangles},); got "
+                f"{tuple(self.vertices_per_triangle.shape)}."
+            )
+        if self.triangle_vertex_offsets.shape != (num_triangles,):
+            raise ValueError(
+                "TriangleSplattingScene.triangle_vertex_offsets must have "
+                f"shape ({num_triangles},); got "
+                f"{tuple(self.triangle_vertex_offsets.shape)}."
+            )
+        if not torch.all(self.vertices_per_triangle == vertices_per_primitive):
+            raise ValueError(
+                "TriangleSplattingScene currently expects dense equal-size "
+                "triangle vertex counts."
+            )
+
+
 class RadFoamScene(Scene):
     """Canonical Radiant Foam scene contract."""
 

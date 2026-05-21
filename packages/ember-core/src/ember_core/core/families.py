@@ -11,6 +11,7 @@ SPARSE_VOXEL: Final = SceneFamilyKey("core", "sparse_voxel")
 FOAM: Final = SceneFamilyKey("core", "foam")
 RADFOAM: Final = SceneFamilyKey("core", "radfoam")
 POWERFOAM: Final = SceneFamilyKey("core", "powerfoam")
+TRIANGLE_SPLATTING: Final = SceneFamilyKey("core", "triangle_splatting")
 
 
 def scene_family_id(value: str | SceneFamilyKey) -> str:
@@ -20,6 +21,8 @@ def scene_family_id(value: str | SceneFamilyKey) -> str:
         return "gaussian"
     if serialized == SPARSE_VOXEL.serialized:
         return "sparse_voxel"
+    if serialized == TRIANGLE_SPLATTING.serialized:
+        return "triangle_splatting"
     if serialized in {
         FOAM.serialized,
         RADFOAM.serialized,

@@ -16,6 +16,7 @@ TRAINING_NOTEBOOKS = (
     REPO_ROOT / "papers/stoch3dgs/notebook.py",
     REPO_ROOT / "papers/stoch_fast_gs/notebook.py",
     REPO_ROOT / "papers/svraster/notebook.py",
+    REPO_ROOT / "papers/triangle_splatting/notebook.py",
 )
 
 MARKDOWN_CELL_PATTERN = re.compile(
@@ -24,6 +25,10 @@ MARKDOWN_CELL_PATTERN = re.compile(
 )
 COLUMN_DECORATOR_PATTERN = re.compile(
     r"@app\.(?:cell|function|class_definition)\([^)]*\bcolumn\s*=",
+)
+CELL_PATTERN = re.compile(
+    r"@app\.cell[^\n]*\ndef _\((?P<args>.*?)\):(?P<body>.*?)(?=\n\n@app\.|\Z)",
+    re.DOTALL,
 )
 FORBIDDEN_HEADINGS = {
     "# Training",
@@ -100,3 +105,52 @@ def test_training_results_and_viewers_render_inside_io_section() -> None:
 
         assert result_view_index < implementation_index, notebook_path
         assert viewer_index < implementation_index, notebook_path
+
+
+def test_training_status_and_preview_cells_use_shared_refresh_boundaries() -> (
+    None
+):
+    for notebook_path in TRAINING_NOTEBOOKS:
+        source = notebook_path.read_text()
+        cells = [
+            (match.group("args"), match.group("body"))
+            for match in CELL_PATTERN.finditer(source)
+        ]
+        result_cells = [
+            (args, body)
+            for args, body in cells
+            if "return (training_result_view,)" in body
+        ]
+        viewer_cells = [
+            (args, body)
+            for args, body in cells
+            if "return (training_viewer,)" in body
+        ]
+
+        assert "render_training_status_panel_from_handle" in source, (
+            notebook_path
+        )
+        assert "metric_text_parts" not in source, notebook_path
+        assert "format_duration(snapshot" not in source, notebook_path
+        assert "training_viewer_handle.snapshot()" not in source, notebook_path
+
+        assert len(result_cells) == 1, notebook_path
+        result_args, result_body = result_cells[0]
+        assert "training_status_refresh" in result_args + result_body, (
+            notebook_path
+        )
+        assert "training_inspector_refresh" not in result_args + result_body, (
+            notebook_path
+        )
+        assert "render_training_status_panel_from_handle" in result_body, (
+            notebook_path
+        )
+
+        assert len(viewer_cells) == 1, notebook_path
+        viewer_args, viewer_body = viewer_cells[0]
+        assert "training_inspector_refresh" in viewer_args + viewer_body, (
+            notebook_path
+        )
+        assert "training_status_refresh" not in viewer_args + viewer_body, (
+            notebook_path
+        )

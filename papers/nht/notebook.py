@@ -1258,19 +1258,6 @@ def resolve_training_config(
 
 
 @app.function
-def format_duration(seconds: float) -> str:
-    """Format a short ETA duration."""
-    total_seconds = max(0, round(seconds))
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours:d}h {minutes:02d}m"
-    if minutes > 0:
-        return f"{minutes:d}m {seconds:02d}s"
-    return f"{seconds:d}s"
-
-
-@app.function
 def nht_should_show_jit_compile_notice(
     config: NHTExperimentConfig,
     snapshot: Any,
@@ -1758,85 +1745,27 @@ def _(
     training_viewer_handle,
 ):
     _ = training_status_refresh.value
-    if training_result is not None:
-        training_result_view = mo.md(
-            f"Checkpoint: `{training_result.checkpoint_dir}`\n\n"
-            f"Steps: `{len(training_result.history)}`"
+    _training_snapshot = ember_splatting.snapshot_training_viewer(
+        training_viewer_handle
+    )
+    _running_notice_text = None
+    if _training_snapshot is not None and nht_should_show_jit_compile_notice(
+        current_config,
+        _training_snapshot,
+        is_script_mode=is_script_mode,
+    ):
+        _running_notice_text = (
+            "NHT shader JIT compilation is likely running. The first "
+            "training step can take a while; progress and metrics will "
+            "appear after compilation finishes."
         )
-    elif training_viewer_handle is None:
-        training_result_view = mo.md("Prepare the training inspector first.")
-    else:
-        snapshot = training_viewer_handle.snapshot()
-        if snapshot.status == "idle":
-            training_result_view = mo.md("Training has not started.")
-        elif nht_should_show_jit_compile_notice(
-            current_config,
-            snapshot,
-            is_script_mode=is_script_mode,
-        ):
-            training_result_view = mo.callout(
-                "NHT shader JIT compilation is likely running. The first "
-                "training step can take a while; progress and metrics will "
-                "appear after compilation finishes.",
-                kind="warn",
-            )
-        elif snapshot.status in {"running", "stopping"}:
-            step_text = (
-                f"{snapshot.step} / {snapshot.max_steps}"
-                if snapshot.max_steps is not None
-                else str(snapshot.step)
-            )
-            metric_text_parts = [
-                f"{name}={value:.6g}"
-                for name, value in sorted(snapshot.latest_metrics.items())
-            ]
-            if snapshot.primitive_count is not None:
-                metric_text_parts.append(
-                    f"primitives={snapshot.primitive_count:,}"
-                )
-            if snapshot.iterations_per_second is not None:
-                metric_text_parts.append(
-                    f"it/s={snapshot.iterations_per_second:.2f}"
-                )
-            metric_text = " | ".join(metric_text_parts)
-            status_text = (
-                "Stopping" if snapshot.status == "stopping" else "Training"
-            )
-            speed_text = (
-                f"{snapshot.iterations_per_second:.2f} it/s"
-                if snapshot.iterations_per_second is not None
-                else "-- it/s"
-            )
-            elapsed_text = (
-                f"elapsed {format_duration(snapshot.elapsed_seconds)}"
-                if snapshot.elapsed_seconds is not None
-                else "elapsed --"
-            )
-            eta_text = (
-                f"ETA {format_duration(snapshot.eta_seconds)}"
-                if snapshot.eta_seconds is not None
-                else "ETA --"
-            )
-            training_result_view = mo.md(
-                f"{status_text}: `{step_text}` {speed_text} "
-                f"{elapsed_text} {eta_text}"
-                + (f"\n\n{metric_text}" if metric_text else "")
-            )
-        elif snapshot.status == "cancelled":
-            training_result_view = mo.md(
-                f"Training cancelled at step `{snapshot.step}`."
-            )
-        elif snapshot.status == "failed":
-            training_result_view = mo.callout(
-                f"Training failed.\n\n```text\n{snapshot.error_text or ''}\n```",
-                kind="danger",
-            )
-        else:
-            assert snapshot.result is not None
-            training_result_view = mo.md(
-                f"Checkpoint: `{snapshot.result.checkpoint_dir}`\n\n"
-                f"Steps: `{len(snapshot.result.history)}`"
-            )
+    training_result_view = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            training_result=training_result,
+            running_notice_text=_running_notice_text,
+        )
+    )
     return (training_result_view,)
 
 

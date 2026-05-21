@@ -12,6 +12,7 @@ import weakref
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass, replace
+from os import PathLike
 from typing import Any, Literal
 
 import marimo as mo
@@ -280,6 +281,10 @@ def format_training_metric_parts(
     ]
 
 
+TrainingStatusInfoRows = (
+    Mapping[str, object | None] | Sequence[tuple[str, object | None]]
+)
+TrainingPreparationErrorRows = Sequence[tuple[str, BaseException | None]]
 TrainingViewerStatus = Literal[
     "idle",
     "running",
@@ -357,6 +362,297 @@ class TrainingViewerSnapshot:
     primitive_count: int | None = None
     result: TrainingResult | None = None
     error_text: str | None = None
+
+
+def format_training_duration(seconds: float) -> str:
+    """Format a compact elapsed or remaining training duration."""
+    total_seconds = max(0, round(seconds))
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours:d}h {minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes:d}m {seconds:02d}s"
+    return f"{seconds:d}s"
+
+
+def format_training_status(
+    snapshot: Any,
+    *,
+    verbose_metrics: bool = False,
+) -> str:
+    """Format a live training status line and its selected metrics."""
+    if snapshot is None or snapshot.status == "idle":
+        return "Training has not started."
+    if snapshot.status == "cancelled":
+        return f"Training cancelled at step `{snapshot.step}`."
+    if snapshot.status == "complete":
+        result = getattr(snapshot, "result", None)
+        if result is not None:
+            return (
+                f"Checkpoint: `{result.checkpoint_dir}`\n\n"
+                f"Steps: `{len(result.history)}`"
+            )
+        return f"Training complete at step `{snapshot.step}`."
+    if snapshot.status == "failed":
+        return f"Training failed at step `{snapshot.step}`."
+
+    step_text = (
+        f"{snapshot.step} / {snapshot.max_steps}"
+        if getattr(snapshot, "max_steps", None) is not None
+        else str(snapshot.step)
+    )
+    metric_parts = format_training_metric_parts(
+        getattr(snapshot, "latest_metrics", None) or {},
+        verbose_metrics=verbose_metrics,
+    )
+    primitive_count = getattr(snapshot, "primitive_count", None)
+    if primitive_count is not None:
+        metric_parts.append(f"primitives={primitive_count:,}")
+    if snapshot.iterations_per_second is not None:
+        metric_parts.append(f"it/s={snapshot.iterations_per_second:.2f}")
+    metric_text = " | ".join(metric_parts)
+    status_text = "Stopping" if snapshot.status == "stopping" else "Training"
+    speed_text = (
+        f"{snapshot.iterations_per_second:.2f} it/s"
+        if snapshot.iterations_per_second is not None
+        else "-- it/s"
+    )
+    elapsed_text = (
+        f"elapsed {format_training_duration(snapshot.elapsed_seconds)}"
+        if getattr(snapshot, "elapsed_seconds", None) is not None
+        else "elapsed --"
+    )
+    eta_text = (
+        f"ETA {format_training_duration(snapshot.eta_seconds)}"
+        if getattr(snapshot, "eta_seconds", None) is not None
+        else "ETA --"
+    )
+    return (
+        f"{status_text}: `{step_text}` {speed_text} {elapsed_text} {eta_text}"
+        + (f"\n\n{metric_text}" if metric_text else "")
+    )
+
+
+def format_training_status_info_value(value: object | None) -> str:
+    """Format one arbitrary training-info value for a markdown table."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool):
+        return f"`{str(value).lower()}`"
+    if isinstance(value, int | float):
+        return f"`{value:g}`"
+    if isinstance(value, PathLike):
+        return f"`{value}`"
+    return str(value)
+
+
+def escape_markdown_table_cell(value: object | None) -> str:
+    """Escape one value for inclusion in a markdown table cell."""
+    return (
+        format_training_status_info_value(value)
+        .replace("|", r"\|")
+        .replace("\n", "<br>")
+    )
+
+
+def normalize_training_status_info_rows(
+    info_rows: TrainingStatusInfoRows | None,
+) -> tuple[tuple[str, object], ...]:
+    """Normalize arbitrary training-info rows into a stable tuple."""
+    if not info_rows:
+        return ()
+    items = (
+        info_rows.items()
+        if isinstance(info_rows, Mapping)
+        else tuple(info_rows)
+    )
+    return tuple(
+        (str(name), value) for name, value in items if value is not None
+    )
+
+
+def format_training_status_info_table(
+    info_rows: TrainingStatusInfoRows | None,
+    *,
+    title: str = "Training info",
+) -> str:
+    """Format arbitrary training-info rows as a markdown table."""
+    rows = normalize_training_status_info_rows(info_rows)
+    if not rows:
+        return ""
+    lines = [
+        f"### {title}",
+        "",
+        "| Item | Value |",
+        "| --- | --- |",
+    ]
+    lines.extend(
+        "| "
+        f"{escape_markdown_table_cell(name)}"
+        " | "
+        f"{escape_markdown_table_cell(value)}"
+        " |"
+        for name, value in rows
+    )
+    return "\n".join(lines)
+
+
+def training_status_snapshot_from_result(
+    result: TrainingResult,
+) -> TrainingViewerSnapshot:
+    """Build a completed status snapshot from a synchronous training result."""
+    latest_metrics = result.history[-1] if result.history else {}
+    return TrainingViewerSnapshot(
+        status="complete",
+        step=result.state.step,
+        max_steps=result.state.step,
+        latest_metrics=dict(latest_metrics),
+        result=result,
+    )
+
+
+def training_config_for_notebook_thread(
+    training_config: TrainingConfig,
+) -> TrainingConfig:
+    """Return a training config suitable for notebook background threads."""
+    batching = training_config.batching
+    if batching.num_workers == 0 and batching.persistent_workers is False:
+        return training_config
+    return training_config.model_copy(
+        update={
+            "batching": batching.model_copy(
+                update={
+                    "num_workers": 0,
+                    "persistent_workers": False,
+                }
+            )
+        }
+    )
+
+
+def select_training_preparation_error(
+    preparation_errors: TrainingPreparationErrorRows | None,
+    *,
+    fallback_error: BaseException | None = None,
+    fallback_title: str = "Preparation failed",
+) -> tuple[BaseException | None, str]:
+    """Select the first present preparation error and its display title."""
+    if preparation_errors is not None:
+        for title, error in preparation_errors:
+            if error is not None:
+                return error, title
+    return fallback_error, fallback_title
+
+
+def render_training_status_panel(
+    snapshot: Any | None = None,
+    *,
+    preparation_error: BaseException | None = None,
+    preparation_error_title: str = "Preparation failed",
+    training_result: TrainingResult | None = None,
+    running_notice_text: str | None = None,
+    verbose_metrics: bool = False,
+    info_rows: TrainingStatusInfoRows | None = None,
+    info_title: str = "Training info",
+) -> Any:
+    """Render a notebook status panel with optional arbitrary info rows."""
+    if preparation_error is not None:
+        status_output = mo.callout(
+            f"{preparation_error_title}.\n\n"
+            f"```text\n{type(preparation_error).__name__}: "
+            f"{preparation_error}\n```",
+            kind="danger",
+        )
+    else:
+        resolved_snapshot = snapshot
+        if training_result is not None and (
+            resolved_snapshot is None
+            or getattr(resolved_snapshot, "status", None) == "idle"
+        ):
+            resolved_snapshot = training_status_snapshot_from_result(
+                training_result
+            )
+        if (
+            resolved_snapshot is not None
+            and getattr(resolved_snapshot, "status", None) == "failed"
+        ):
+            status_output = mo.callout(
+                "Training failed.\n\n"
+                f"```text\n{resolved_snapshot.error_text or ''}\n```",
+                kind="danger",
+            )
+        elif running_notice_text:
+            status_output = mo.callout(running_notice_text, kind="warn")
+        else:
+            status_output = mo.md(
+                format_training_status(
+                    resolved_snapshot,
+                    verbose_metrics=verbose_metrics,
+                )
+            )
+
+    info_table = format_training_status_info_table(
+        info_rows,
+        title=info_title,
+    )
+    if not info_table:
+        return status_output
+    return mo.vstack(
+        [status_output, mo.md(info_table)],
+        gap=0.5,
+    ).style(max_height="none", overflow="visible")
+
+
+def snapshot_training_viewer(
+    training_viewer_handle: TrainingViewerHandle | None,
+) -> TrainingViewerSnapshot | None:
+    """Return a viewer snapshot if a training viewer has been prepared."""
+    if training_viewer_handle is None:
+        return None
+    return training_viewer_handle.snapshot()
+
+
+def render_training_status_panel_from_handle(
+    training_viewer_handle: TrainingViewerHandle | None,
+    *,
+    preparation_error: BaseException | None = None,
+    preparation_error_title: str = "Preparation failed",
+    preparation_errors: TrainingPreparationErrorRows | None = None,
+    training_result: TrainingResult | None = None,
+    running_notice_text: str | None = None,
+    verbose_metrics: bool = False,
+    missing_viewer_text: str | None = "Prepare the training inspector first.",
+    info_rows: TrainingStatusInfoRows | None = None,
+    info_title: str = "Training info",
+) -> Any:
+    """Render notebook status from a training viewer handle."""
+    preparation_error, preparation_error_title = (
+        select_training_preparation_error(
+            preparation_errors,
+            fallback_error=preparation_error,
+            fallback_title=preparation_error_title,
+        )
+    )
+    if (
+        training_viewer_handle is None
+        and preparation_error is None
+        and training_result is None
+        and missing_viewer_text is not None
+    ):
+        return mo.md(missing_viewer_text)
+    return render_training_status_panel(
+        snapshot_training_viewer(training_viewer_handle),
+        preparation_error=preparation_error,
+        preparation_error_title=preparation_error_title,
+        training_result=training_result,
+        running_notice_text=running_notice_text,
+        verbose_metrics=verbose_metrics,
+        info_rows=info_rows,
+        info_title=info_title,
+    )
 
 
 @dataclass(frozen=True)
@@ -1082,6 +1378,12 @@ class TrainingViewerHandle:
         resolved_training_config = training_config or self._training_config
         if resolved_training_config is None:
             raise RuntimeError("Training viewer has no training config.")
+        if isinstance(resolved_training_config, TrainingConfig):
+            # Prepared-frame materialization is already complete here; disable
+            # multiprocessing DataLoader workers for marimo thread runtimes.
+            resolved_training_config = training_config_for_notebook_thread(
+                resolved_training_config
+            )
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return False
@@ -3146,8 +3448,10 @@ __all__ = [
     "COMPACT_TRAINING_METRIC_NAMES",
     "TRAINING_VIEW_RENDER_MODES",
     "TRAINING_VIEW_RENDER_MODE_LABELS",
+    "TrainingPreparationErrorRows",
     "TrainingPreparationHandle",
     "TrainingPreparationSnapshot",
+    "TrainingStatusInfoRows",
     "TrainingViewDepthRangeMode",
     "TrainingViewInspection",
     "TrainingViewInspector",
@@ -3170,15 +3474,27 @@ __all__ = [
     "create_training_view_inspector",
     "create_training_viewer",
     "crop_scalar_map_to",
+    "escape_markdown_table_cell",
+    "format_training_duration",
     "format_training_metric_parts",
+    "format_training_status",
+    "format_training_status_info_table",
+    "format_training_status_info_value",
     "image_loss_error_map",
     "image_loss_label_for_terms",
+    "normalize_training_status_info_rows",
     "psnr_map",
     "render_training_preparation_status",
+    "render_training_status_panel",
+    "render_training_status_panel_from_handle",
     "render_training_view_inspector",
+    "select_training_preparation_error",
+    "snapshot_training_viewer",
     "ssim_error_map",
+    "training_config_for_notebook_thread",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_status_snapshot_from_result",
     "training_view_image_loss_terms",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",

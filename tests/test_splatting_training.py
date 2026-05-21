@@ -28,12 +28,15 @@ from ember_core.training.checkpoints import (
     save_checkpoint_dir,
 )
 from ember_core.training.config import (
+    BatchingConfig,
+    CallableSpec,
     CheckpointExportConfig,
     LossConfig,
     OptimizationConfig,
     ParameterGroupConfig,
     ParameterTargetSpec,
     RenderPipelineSpec,
+    RuntimeConfig,
     TensorSliceSpec,
     TensorViewSpec,
     TrainingConfig,
@@ -76,10 +79,18 @@ from ember_splatting_training.training_viewer import (
     create_training_preparation,
     create_training_run,
     create_training_viewer,
+    format_training_duration,
     format_training_metric_parts,
+    format_training_status,
+    format_training_status_info_table,
     image_loss_error_map,
     psnr_map,
+    render_training_status_panel,
+    render_training_status_panel_from_handle,
+    select_training_preparation_error,
+    snapshot_training_viewer,
     ssim_error_map,
+    training_config_for_notebook_thread,
     training_preparation_outputs,
     training_view_image_loss_terms,
     viridis_error_map,
@@ -1129,10 +1140,20 @@ def test_splatting_training_package_exports() -> None:
     assert hasattr(splatting_training, "create_training_run")
     assert hasattr(splatting_training, "create_training_view_inspector")
     assert hasattr(splatting_training, "create_training_viewer")
+    assert hasattr(splatting_training, "format_training_duration")
     assert hasattr(splatting_training, "format_training_metric_parts")
+    assert hasattr(splatting_training, "format_training_status")
+    assert hasattr(splatting_training, "format_training_status_info_table")
     assert hasattr(splatting_training, "render_training_preparation_status")
+    assert hasattr(splatting_training, "render_training_status_panel")
+    assert hasattr(
+        splatting_training, "render_training_status_panel_from_handle"
+    )
+    assert hasattr(splatting_training, "select_training_preparation_error")
+    assert hasattr(splatting_training, "snapshot_training_viewer")
     assert hasattr(splatting_training, "ssim_error_map")
     assert hasattr(splatting_training, "training_inspector_spinner")
+    assert hasattr(splatting_training, "training_config_for_notebook_thread")
     assert hasattr(splatting_training, "training_preparation_outputs")
     assert hasattr(splatting_training, "training_view_render_mode_options")
 
@@ -1160,6 +1181,160 @@ def test_format_training_metric_parts_can_be_compact_or_verbose() -> None:
     ]
     assert "scene_vertex_features_abs_mean=9" not in compact
     assert "scene_vertex_features_abs_mean=9" in verbose
+
+
+def test_format_training_status_includes_runtime_metrics() -> None:
+    snapshot = SimpleNamespace(
+        status="running",
+        step=25,
+        max_steps=100,
+        latest_metrics={
+            "loss": 0.123456,
+            "l1": 0.1,
+            "ssim_loss": 0.02,
+        },
+        iterations_per_second=50.0,
+        elapsed_seconds=12.2,
+        eta_seconds=1.1,
+        primitive_count=1234,
+    )
+
+    status_text = format_training_status(snapshot)
+
+    assert "Training: `25 / 100` 50.00 it/s elapsed 12s ETA 1s" in status_text
+    assert "l1=0.1" in status_text
+    assert "loss=0.123456" in status_text
+    assert "ssim_loss=0.02" in status_text
+    assert "primitives=1,234" in status_text
+    assert "it/s=50.00" in status_text
+    assert format_training_duration(61.2) == "1m 01s"
+
+
+def test_format_training_status_uses_checkpoint_for_completed_result() -> None:
+    result = SimpleNamespace(
+        checkpoint_dir="/tmp/checkpoints/run_1",
+        history=[{"loss": 1.0}, {"loss": 0.5}],
+    )
+    snapshot = SimpleNamespace(
+        status="complete",
+        step=2,
+        result=result,
+    )
+
+    status_text = format_training_status(snapshot)
+
+    assert "Checkpoint: `/tmp/checkpoints/run_1`" in status_text
+    assert "Steps: `2`" in status_text
+
+
+def test_format_training_status_info_table_accepts_arbitrary_rows() -> None:
+    table = format_training_status_info_table(
+        [
+            ("Preset", "`garden_debug_val`"),
+            ("Skipped", None),
+            ("Pipe", "a|b"),
+            ("Count", 3),
+        ],
+        title="Run info",
+    )
+
+    assert "### Run info" in table
+    assert "| Preset | `garden_debug_val` |" in table
+    assert "| Pipe | a\\|b |" in table
+    assert "| Count | `3` |" in table
+    assert "Skipped" not in table
+
+
+def test_render_training_status_panel_accepts_arbitrary_info_rows() -> None:
+    snapshot = SimpleNamespace(
+        status="idle",
+        step=0,
+        max_steps=None,
+        latest_metrics={},
+        iterations_per_second=None,
+        elapsed_seconds=None,
+        eta_seconds=None,
+        primitive_count=None,
+    )
+
+    panel = render_training_status_panel(
+        snapshot,
+        info_rows=[("Preset", "`garden_debug_val`")],
+        info_title="Run info",
+    )
+
+    assert panel is not None
+
+
+def test_select_training_preparation_error_returns_first_present_error() -> (
+    None
+):
+    scene_error = RuntimeError("scene failed")
+    frame_error = RuntimeError("frame failed")
+
+    error, title = select_training_preparation_error(
+        [
+            ("Scene loading failed", None),
+            ("Frame dataset preparation failed", frame_error),
+            ("Scene loading failed", scene_error),
+        ]
+    )
+
+    assert error is frame_error
+    assert title == "Frame dataset preparation failed"
+
+
+def test_snapshot_training_viewer_handles_missing_or_prepared_viewers() -> None:
+    snapshot = SimpleNamespace(status="running", step=5)
+    handle = SimpleNamespace(snapshot=lambda: snapshot)
+
+    assert snapshot_training_viewer(None) is None
+    assert snapshot_training_viewer(handle) is snapshot
+
+
+def test_render_training_status_panel_from_handle_accepts_missing_viewer() -> (
+    None
+):
+    panel = render_training_status_panel_from_handle(None)
+
+    assert panel is not None
+
+
+def test_render_training_status_panel_from_handle_accepts_training_result() -> (
+    None
+):
+    result = SimpleNamespace(
+        state=SimpleNamespace(step=2),
+        checkpoint_dir="/tmp/checkpoints/run_1",
+        history=[{"loss": 1.0}, {"loss": 0.5}],
+    )
+
+    panel = render_training_status_panel_from_handle(
+        None,
+        training_result=result,
+    )
+
+    assert panel is not None
+
+
+def test_render_training_status_panel_from_handle_accepts_handle_snapshot() -> (
+    None
+):
+    snapshot = SimpleNamespace(
+        status="running",
+        step=25,
+        max_steps=100,
+        latest_metrics={"loss": 0.5},
+        iterations_per_second=50.0,
+        elapsed_seconds=12.2,
+        eta_seconds=1.1,
+        primitive_count=1234,
+    )
+    handle = SimpleNamespace(snapshot=lambda: snapshot)
+
+    panel = render_training_status_panel_from_handle(handle)
+
+    assert panel is not None
 
 
 def test_training_view_inspector_config_validates_l1_range() -> None:
@@ -1558,6 +1733,24 @@ def _training_config_stub() -> SimpleNamespace:
     return SimpleNamespace(runtime=SimpleNamespace(max_steps=1))
 
 
+def _notebook_training_config_stub(
+    *,
+    num_workers: int = 8,
+    persistent_workers: bool = True,
+) -> TrainingConfig:
+    """Build a real training config for notebook-launch tests."""
+    return TrainingConfig(
+        runtime=RuntimeConfig(max_steps=1),
+        batching=BatchingConfig(
+            num_workers=num_workers,
+            persistent_workers=persistent_workers,
+            pin_memory=True,
+        ),
+        render=RenderPipelineSpec(backend="test.backend"),
+        loss=LossConfig(target=CallableSpec(target="tests.fake_loss")),
+    )
+
+
 def test_training_viewer_rerender_is_nonblocking_by_default() -> None:
     viewer = _RecordingViewer()
     handle = TrainingViewerHandle(
@@ -1643,6 +1836,74 @@ def test_training_run_creates_noninteractive_notebook_handle(
         assert len(handle.runtime_hooks()) == 1
     finally:
         handle.close(join_timeout=0.0)
+
+
+def test_training_config_for_notebook_thread_disables_dataloader_workers() -> (
+    None
+):
+    training_config = _notebook_training_config_stub(
+        num_workers=8,
+        persistent_workers=True,
+    )
+
+    notebook_config = training_config_for_notebook_thread(training_config)
+
+    assert notebook_config is not training_config
+    assert notebook_config.batching.num_workers == 0
+    assert notebook_config.batching.persistent_workers is False
+    assert notebook_config.batching.pin_memory is True
+    assert training_config.batching.num_workers == 8
+    assert training_config.batching.persistent_workers is True
+
+
+def test_training_viewer_start_training_uses_notebook_thread_config(
+    monkeypatch,
+) -> None:
+    captured_training_config = {}
+
+    def fake_run_training(*args, **kwargs):
+        del kwargs
+        captured_training_config["config"] = args[1]
+        return SimpleNamespace(
+            state=TrainState(
+                model=InitializedModel(
+                    scene=GaussianScene3D(
+                        center_position=torch.zeros((1, 3)),
+                        log_scales=torch.zeros((1, 3)),
+                        quaternion_orientation=torch.zeros((1, 4)),
+                        logit_opacity=torch.zeros((1,)),
+                        feature=torch.zeros((1, 1, 3)),
+                        sh_degree=0,
+                    ),
+                    modules={},
+                    parameters={},
+                ),
+                step=1,
+                seed=0,
+                device=torch.device("cpu"),
+            ),
+            history=[{"loss": 1.0}],
+            checkpoint_dir="checkpoint",
+        )
+
+    monkeypatch.setattr(
+        "ember_splatting_training.training_viewer.run_training",
+        fake_run_training,
+    )
+    handle = TrainingViewerHandle(
+        config=TrainingViewerConfig(enabled=False, show_progress=False),
+        _training_config=_notebook_training_config_stub(num_workers=8),
+        _running_in_notebook=True,
+    )
+
+    assert handle.start_training(object()) is True
+    assert handle._thread is not None
+    handle._thread.join(timeout=2.0)
+
+    training_config = captured_training_config["config"]
+    assert isinstance(training_config, TrainingConfig)
+    assert training_config.batching.num_workers == 0
+    assert training_config.batching.persistent_workers is False
 
 
 def test_training_viewer_uses_prepared_dataset_camera(monkeypatch) -> None:

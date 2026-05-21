@@ -1,0 +1,100 @@
+{
+  "preset": "garden",
+  "scene": {
+    "path": "dataset/mipnerf360/garden",
+    "image_directory": "images_4",
+    "image_root": null,
+    "undistort_output_dir": null,
+    "align_horizon": true
+  },
+  "data": {
+    "camera_sensor_id": null,
+    "image_scale_factor": 1.0,
+    "split_target": "train",
+    "split_every_n": 8,
+    "materialization_stage": "prepared",
+    "materialization_mode": "eager",
+    "materialization_num_workers": 8,
+    "normalize_images": true,
+    "interpolation": "bicubic"
+  },
+  "training": {
+    "runtime": {
+      "device": "cuda",
+      "seed": 0,
+      "max_steps": 30000
+    },
+    "batching": {
+      "batch_size": 1,
+      "shuffle": true,
+      "num_workers": 8,
+      "persistent_workers": true,
+      "pin_memory": true
+    },
+    "initialization": {
+      "sh_degree": 3,
+      "vertices_per_triangle": 3,
+      "initial_opacity": 0.28,
+      "initial_triangle_size": 2.23,
+      "initial_sigma": 1.16,
+      "include_sky_dome": true,
+      "seed": 0
+    },
+    "render": {
+      "backend": "triangle_splatting.core",
+      "near_plane": 0.01,
+      "far_plane": 100.0,
+      "background_color": [0.0, 0.0, 0.0],
+      "return_alpha": true,
+      "return_depth": true,
+      "return_normals": true,
+      "clamp_output": false,
+      "depth_mode": "median"
+    },
+    "optimization": {
+      "optimizer": "torch.optim.Adam",
+      "feature_lr": 0.0025,
+      "opacity_lr": 0.014,
+      "sigma_lr": 0.0008,
+      "triangle_vertices_lr_init": 0.0018,
+      "triangle_vertices_lr_final_factor": 0.01,
+      "triangle_vertices_lr_max_steps": 30000,
+      "adam_eps": 1e-15
+    },
+    "loss": {
+      "lambda_dssim": 0.2,
+      "lambda_opacity": 0.0055,
+      "lambda_size": 1e-8,
+      "lambda_normals": 0.0001,
+      "lambda_dist": 0.0,
+      "iteration_mesh": 5000,
+      "densify_until_iter": 25000,
+      "outdoor": true
+    },
+    "densification": {
+      "densification_interval": 500,
+      "densify_from_iter": 500,
+      "densify_until_iter": 25000,
+      "max_shapes": 5200000,
+      "add_shape": 1.3,
+      "split_size": 24.0,
+      "max_noise_factor": 1.5,
+      "opacity_dead": 0.014,
+      "importance_threshold": 0.022,
+      "proba_distr": 2,
+      "outdoor": true
+    },
+    "profiler": {
+      "enabled": false,
+      "log_every": 10,
+      "cuda_memory": true,
+      "sync_timing": false,
+      "output_path": null
+    },
+    "checkpoint": {
+      "output_dir": "checkpoints/papers/triangle_splatting/garden/triangle_splatting.core",
+      "export_ply": false,
+      "overwrite": false
+    }
+  }
+}

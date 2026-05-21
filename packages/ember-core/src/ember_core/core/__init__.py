@@ -52,6 +52,7 @@ from ember_core.core.contracts import (
     Scene,
     SceneFamily,
     SparseVoxelScene,
+    TriangleSplattingScene,
     camera_params_to_intrinsics,
     intrinsics_to_camera_params,
 )
@@ -82,6 +83,7 @@ from ember_core.core.families import (
     POWERFOAM,
     RADFOAM,
     SPARSE_VOXEL,
+    TRIANGLE_SPLATTING,
     scene_family_id,
 )
 from ember_core.core.keys import (
@@ -142,6 +144,7 @@ __all__ = [
     "SPARSE_VOXEL",
     "STAGES",
     "TRAITS",
+    "TRIANGLE_SPLATTING",
     "AccessMode",
     "BackendId",
     "BackendRef",
@@ -213,6 +216,7 @@ __all__ = [
     "SymbolName",
     "SymbolRegistry",
     "TraitKey",
+    "TriangleSplattingScene",
     "camera_params_to_intrinsics",
     "intrinsics_to_camera_params",
     "load_ember_extensions",

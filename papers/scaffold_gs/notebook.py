@@ -640,18 +640,12 @@ def _(
 @app.cell
 def _(training_result, training_status_refresh, training_viewer_handle):
     _ = training_status_refresh.value
-    if training_result is not None:
-        training_result_view = mo.md(
-            f"Checkpoint: `{training_result.checkpoint_dir}`\n\n"
-            f"Steps: `{len(training_result.history)}`"
+    training_result_view = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            training_result=training_result,
         )
-    elif training_viewer_handle is None:
-        training_result_view = mo.md("Prepare the training inspector first.")
-    else:
-        snapshot = training_viewer_handle.snapshot()
-        training_result_view = mo.md(
-            f"Status: `{snapshot.status}` step `{snapshot.step}`"
-        )
+    )
     return (training_result_view,)
 
 

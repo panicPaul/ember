@@ -22,8 +22,10 @@ __all__ = [
     "GaussianMCMC",
     "GaussianMipSplatting3DFilter",
     "GaussianMortonOrdering",
+    "TrainingPreparationErrorRows",
     "TrainingPreparationHandle",
     "TrainingPreparationSnapshot",
+    "TrainingStatusInfoRows",
     "TrainingViewDepthRangeMode",
     "TrainingViewInspection",
     "TrainingViewInspector",
@@ -51,30 +53,42 @@ __all__ = [
     "crop_scalar_map_to",
     "dssim_loss",
     "empty_scalar_frame",
+    "escape_markdown_table_cell",
     "fastergs_training_backend_options",
     "fastgs_l1_metric_map",
     "fastgs_normalize_score",
     "filter_scalars",
     "find_event_files",
+    "format_training_duration",
     "format_training_metric_parts",
+    "format_training_status",
+    "format_training_status_info_table",
+    "format_training_status_info_value",
     "gaussian_3dgs_optimization_config",
     "gaussian_3dgs_parameter_groups",
     "image_loss_error_map",
     "image_loss_label_for_terms",
     "morton_codes",
     "morton_order",
+    "normalize_training_status_info_rows",
     "psnr_map",
     "read_scalar_records",
     "read_scalars",
     "relocation_adjustment",
     "render_training_preparation_status",
+    "render_training_status_panel",
+    "render_training_status_panel_from_handle",
     "render_training_view_inspector",
     "rgb_l1_dssim_loss",
     "scalar_line_chart",
     "scalar_tags",
+    "select_training_preparation_error",
+    "snapshot_training_viewer",
     "ssim_score",
+    "training_config_for_notebook_thread",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_status_snapshot_from_result",
     "training_view_image_loss_terms",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",
@@ -114,8 +128,16 @@ def __getattr__(name: str) -> object:
             return getattr(losses, name)
         case (
             "COMPACT_TRAINING_METRIC_NAMES"
+            | "escape_markdown_table_cell"
+            | "format_training_duration"
             | "format_training_metric_parts"
+            | "format_training_status"
+            | "format_training_status_info_table"
+            | "format_training_status_info_value"
+            | "normalize_training_status_info_rows"
             | "TrainingViewerConfig"
+            | "TrainingPreparationErrorRows"
+            | "TrainingStatusInfoRows"
             | "TRAINING_VIEW_RENDER_MODE_LABELS"
             | "TRAINING_VIEW_RENDER_MODES"
             | "TrainingPreparationHandle"
@@ -146,9 +168,15 @@ def __getattr__(name: str) -> object:
             | "psnr_map"
             | "render_training_view_inspector"
             | "render_training_preparation_status"
+            | "render_training_status_panel"
+            | "render_training_status_panel_from_handle"
+            | "select_training_preparation_error"
+            | "snapshot_training_viewer"
             | "ssim_error_map"
             | "training_inspector_spinner"
+            | "training_config_for_notebook_thread"
             | "training_preparation_outputs"
+            | "training_status_snapshot_from_result"
             | "training_view_image_loss_terms"
             | "training_view_render_mode_options"
             | "training_view_render_modes_for_config"

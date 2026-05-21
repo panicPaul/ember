@@ -25,3 +25,6 @@
 [submodule "third_party/GaussianWrapping"]
 	path = third_party/GaussianWrapping
 	url = https://github.com/diego1401/GaussianWrapping.git
+[submodule "third_party/triangle-splatting"]
+	path = third_party/triangle-splatting
+	url = https://github.com/trianglesplatting/triangle-splatting
