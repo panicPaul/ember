@@ -11,6 +11,7 @@ except ImportError:
         __version__ = "0.0.0"
 
 __all__ = [
+    "COMPACT_TRAINING_METRIC_NAMES",
     "TRAINING_VIEW_RENDER_MODES",
     "TRAINING_VIEW_RENDER_MODE_LABELS",
     "FastGSDensificationRecipe",
@@ -47,6 +48,7 @@ __all__ = [
     "create_training_run",
     "create_training_view_inspector",
     "create_training_viewer",
+    "crop_scalar_map_to",
     "dssim_loss",
     "empty_scalar_frame",
     "fastergs_training_backend_options",
@@ -54,10 +56,14 @@ __all__ = [
     "fastgs_normalize_score",
     "filter_scalars",
     "find_event_files",
+    "format_training_metric_parts",
     "gaussian_3dgs_optimization_config",
     "gaussian_3dgs_parameter_groups",
+    "image_loss_error_map",
+    "image_loss_label_for_terms",
     "morton_codes",
     "morton_order",
+    "psnr_map",
     "read_scalar_records",
     "read_scalars",
     "relocation_adjustment",
@@ -69,6 +75,7 @@ __all__ = [
     "ssim_score",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_view_image_loss_terms",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",
     "viridis_error_map",
@@ -106,7 +113,9 @@ def __getattr__(name: str) -> object:
 
             return getattr(losses, name)
         case (
-            "TrainingViewerConfig"
+            "COMPACT_TRAINING_METRIC_NAMES"
+            | "format_training_metric_parts"
+            | "TrainingViewerConfig"
             | "TRAINING_VIEW_RENDER_MODE_LABELS"
             | "TRAINING_VIEW_RENDER_MODES"
             | "TrainingPreparationHandle"
@@ -131,11 +140,16 @@ def __getattr__(name: str) -> object:
             | "create_training_run"
             | "create_training_view_inspector"
             | "create_training_viewer"
+            | "crop_scalar_map_to"
+            | "image_loss_error_map"
+            | "image_loss_label_for_terms"
+            | "psnr_map"
             | "render_training_view_inspector"
             | "render_training_preparation_status"
             | "ssim_error_map"
             | "training_inspector_spinner"
             | "training_preparation_outputs"
+            | "training_view_image_loss_terms"
             | "training_view_render_mode_options"
             | "training_view_render_modes_for_config"
             | "viridis_error_map"

@@ -34,6 +34,7 @@ from ember_core.training.logging import (
     TensorBoardTrainingLogger,
     build_training_logger,
     checkpoint_log_dir,
+    histogram_tag_for_metric,
     scalar_tag_for_metric,
 )
 from ember_core.training.profiling import (
@@ -170,6 +171,7 @@ __all__ = [
     "densification_config",
     "ensure_checkpoint_output_writable",
     "exponential_decay_to",
+    "histogram_tag_for_metric",
     "hooks_config",
     "initialize_model",
     "instantiate_callable",

@@ -76,8 +76,12 @@ from ember_splatting_training.training_viewer import (
     create_training_preparation,
     create_training_run,
     create_training_viewer,
+    format_training_metric_parts,
+    image_loss_error_map,
+    psnr_map,
     ssim_error_map,
     training_preparation_outputs,
+    training_view_image_loss_terms,
     viridis_error_map,
 )
 from ember_splatting_training.typed_recipes import FastGSDensificationRecipe
@@ -1125,6 +1129,7 @@ def test_splatting_training_package_exports() -> None:
     assert hasattr(splatting_training, "create_training_run")
     assert hasattr(splatting_training, "create_training_view_inspector")
     assert hasattr(splatting_training, "create_training_viewer")
+    assert hasattr(splatting_training, "format_training_metric_parts")
     assert hasattr(splatting_training, "render_training_preparation_status")
     assert hasattr(splatting_training, "ssim_error_map")
     assert hasattr(splatting_training, "training_inspector_spinner")
@@ -1134,15 +1139,40 @@ def test_splatting_training_package_exports() -> None:
 
 def test_training_viewer_default_snapshot_cadence_is_100() -> None:
     assert TrainingViewerConfig().update_every_steps == 100
+    assert TrainingViewerConfig().verbose_metrics is False
+
+
+def test_format_training_metric_parts_can_be_compact_or_verbose() -> None:
+    metrics = {
+        "loss": 1.25,
+        "render_hit_count_q05": 0.0,
+        "render_hit_count_mean": 4.0,
+        "scene_vertex_features_abs_mean": 9.0,
+    }
+
+    compact = format_training_metric_parts(metrics)
+    verbose = format_training_metric_parts(metrics, verbose_metrics=True)
+
+    assert compact == [
+        "loss=1.25",
+        "render_hit_count_q05=0",
+        "render_hit_count_mean=4",
+    ]
+    assert "scene_vertex_features_abs_mean=9" not in compact
+    assert "scene_vertex_features_abs_mean=9" in verbose
 
 
 def test_training_view_inspector_config_validates_l1_range() -> None:
     config = TrainingViewInspectorConfig()
 
     assert config.l1_range == (0.0, 0.2)
+    assert config.image_loss_range == (0.0, 0.2)
     assert config.ssim_range == (0.0, 0.2)
+    assert config.psnr_range == (0.0, 40.0)
     with pytest.raises(ValueError, match="l1_range must lie"):
         TrainingViewInspectorConfig(l1_range=(0.0, 2.0))
+    with pytest.raises(ValueError, match="psnr_range must lie"):
+        TrainingViewInspectorConfig(psnr_range=(0.0, 120.0))
 
 
 class _NoValueElement:
@@ -1175,7 +1205,11 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
     show_training = _NoValueElement("show-training", 0, 0)
     render_mode = _NoValueElement("render-mode", ["Color"], "color")
     l1_range = _NoValueElement("l1-range", [0.0, 0.2], [0.0, 0.2])
+    image_loss_range = _NoValueElement(
+        "image-loss-range", [0.0, 0.2], [0.0, 0.2]
+    )
     ssim_range = _NoValueElement("ssim-range", [0.0, 0.2], [0.0, 0.2])
+    psnr_range = _NoValueElement("psnr-range", [0.0, 40.0], [0.0, 40.0])
     alpha_range = _NoValueElement("alpha-range", [0.0, 1.0], [0.0, 1.0])
     depth_range = _NoValueElement("depth-range", [0.0, 100.0], [0.0, 100.0])
     controls = training_viewer_module.TrainingViewInspectorControls(
@@ -1186,7 +1220,9 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
         show_training_view_button=show_training,
         render_mode_selector=render_mode,
         l1_range_slider=l1_range,
+        image_loss_range_slider=image_loss_range,
         ssim_range_slider=ssim_range,
+        psnr_range_slider=psnr_range,
         alpha_range_slider=alpha_range,
         depth_range_slider=depth_range,
     )
@@ -1200,7 +1236,11 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
             training_viewer_module._INSPECTOR_SHOW_TRAINING_KEY: show_training,
             training_viewer_module._INSPECTOR_RENDER_MODE_KEY: render_mode,
             training_viewer_module._INSPECTOR_L1_RANGE_KEY: l1_range,
+            training_viewer_module._INSPECTOR_IMAGE_LOSS_RANGE_KEY: (
+                image_loss_range
+            ),
             training_viewer_module._INSPECTOR_SSIM_RANGE_KEY: ssim_range,
+            training_viewer_module._INSPECTOR_PSNR_RANGE_KEY: psnr_range,
             training_viewer_module._INSPECTOR_ALPHA_RANGE_KEY: alpha_range,
             training_viewer_module._INSPECTOR_DEPTH_RANGE_KEY: depth_range,
         },
@@ -1210,7 +1250,9 @@ def test_training_view_inspector_initializes_without_child_value_reads() -> (
 
     assert inspector.selected_view_ref(catalog) == "val:0:0"
     assert inspector.l1_value_range() == (0.0, 0.2)
+    assert inspector.image_loss_value_range() == (0.0, 0.2)
     assert inspector.ssim_value_range() == (0.0, 0.2)
+    assert inspector.psnr_value_range() == (0.0, 40.0)
     assert inspector.alpha_value_range() == (0.0, 1.0)
     assert inspector.depth_value_range() == (0.0, 100.0)
     assert inspector.render_mode() == "color"
@@ -2438,6 +2480,12 @@ def test_training_view_inspection_uses_one_render_for_builtin_and_custom_maps() 
     assert inspection.preview_image.dtype == torch.uint8
     assert inspection.ssim_error.shape == (0, 0)
     torch.testing.assert_close(inspection.l1_error, torch.ones((2, 2)))
+    torch.testing.assert_close(
+        inspection.image_loss_error,
+        torch.ones((2, 2)),
+    )
+    torch.testing.assert_close(inspection.psnr, torch.zeros((2, 2)))
+    assert inspection.image_loss_label == "Image loss | 1 L1"
     assert inspection.l1_mean == pytest.approx(1.0)
     assert [result.key for result in inspection.maps] == [
         "l1x2",
@@ -2498,14 +2546,27 @@ def test_training_view_inspection_detects_outputs_and_stays_no_grad() -> None:
         assert not torch.is_grad_enabled()
         return context.l1_error
 
-    handle = TrainingViewerHandle(config=TrainingViewerConfig())
+    training_config = SimpleNamespace(
+        loss=SimpleNamespace(
+            target=SimpleNamespace(
+                target="papers.nht.notebook.nht_rgb_l1_dssim_loss",
+                kwargs={"lambda_l1": 0.8, "lambda_ssim": 0.2},
+            )
+        )
+    )
+    handle = TrainingViewerHandle(
+        config=TrainingViewerConfig(),
+        _training_config=training_config,
+    )
     handle._render_fn = render_once
     handle.update_render_snapshot(state)
 
     inspection = handle.inspect_view(
         sample,
         value_range=(0.0, 1.0),
+        image_loss_value_range=(0.0, 1.0),
         ssim_value_range=(0.0, 1.0),
+        psnr_value_range=(0.0, 40.0),
         alpha_value_range=(0.0, 1.0),
         depth_value_range=(0.0, 100.0),
         render_mode="depth",
@@ -2526,10 +2587,26 @@ def test_training_view_inspection_detects_outputs_and_stays_no_grad() -> None:
     assert inspection.ssim_error.shape == (6, 6)
     assert inspection.ssim_error.requires_grad is False
     assert inspection.l1_error.requires_grad is False
+    assert inspection.image_loss_error.requires_grad is False
+    assert inspection.psnr.requires_grad is False
+    assert inspection.image_loss_error.shape == (6, 6)
+    assert inspection.psnr.shape == (16, 16)
     torch.testing.assert_close(
         inspection.l1_error,
         torch.full((16, 16), 0.5),
     )
+    expected_image_loss = 0.8 * torch.full((6, 6), 0.5)
+    expected_image_loss = expected_image_loss + 0.4 * inspection.ssim_error
+    torch.testing.assert_close(inspection.image_loss_error, expected_image_loss)
+    assert inspection.image_loss_label == "Image loss | 0.8 L1 + 0.2 SSIM"
+    assert inspection.psnr_mean == pytest.approx(6.0206, abs=1.0e-4)
+    expected_psnr_image = viridis_error_map(
+        inspection.psnr,
+        quantile=1.0,
+        value_range=(0.0, 40.0),
+        invert=True,
+    )
+    assert torch.equal(inspection.psnr_image, expected_psnr_image)
     assert inspection.maps[0].values is not None
 
 
@@ -2584,6 +2661,67 @@ def test_ssim_error_map_uses_valid_window() -> None:
     assert error.max() > 0.0
 
 
+def test_image_loss_error_map_combines_l1_and_valid_ssim_crop() -> None:
+    prediction = torch.zeros((16, 17, 3), dtype=torch.float32)
+    target = torch.ones((16, 17, 3), dtype=torch.float32)
+    l1_error = (prediction - target).abs().mean(dim=-1)
+    dssim = ssim_error_map(prediction, target)
+
+    combined = image_loss_error_map(
+        l1_error,
+        dssim,
+        lambda_l1=1.0,
+        lambda_ssim=0.2,
+        ssim_error_scale=2.0,
+    )
+    expected = l1_error[5:-5, 5:-5] + 0.4 * dssim
+
+    assert combined.shape == dssim.shape
+    torch.testing.assert_close(combined, expected)
+
+
+def test_training_view_image_loss_terms_ignore_regularizers() -> None:
+    config = SimpleNamespace(
+        loss=SimpleNamespace(
+            target=SimpleNamespace(
+                target="papers.nht.notebook.nht_rgb_l1_dssim_loss",
+                kwargs={
+                    "lambda_l1": 0.8,
+                    "lambda_ssim": 0.2,
+                    "lambda_opacity_regularization": 99.0,
+                },
+            )
+        )
+    )
+    dssim_config = SimpleNamespace(
+        loss=SimpleNamespace(
+            target=SimpleNamespace(
+                target="ember_splatting_training.losses.rgb_l1_dssim_loss",
+                kwargs={"lambda_l1": 0.7, "lambda_dssim": 0.3},
+            )
+        )
+    )
+
+    assert training_view_image_loss_terms(config) == (0.8, 0.2, 2.0, "SSIM")
+    assert training_view_image_loss_terms(dssim_config) == (
+        0.7,
+        0.3,
+        1.0,
+        "DSSIM",
+    )
+
+
+def test_psnr_map_returns_per_pixel_db_values() -> None:
+    prediction = torch.full((2, 2, 3), 0.5, dtype=torch.float32)
+    target = torch.zeros((2, 2, 3), dtype=torch.float32)
+
+    psnr = psnr_map(prediction, target)
+    exact = psnr_map(target, target)
+
+    torch.testing.assert_close(psnr, torch.full((2, 2), 6.0206))
+    torch.testing.assert_close(exact, torch.full((2, 2), 100.0))
+
+
 def test_viridis_error_map_clips_to_explicit_range() -> None:
     colors = viridis_error_map(
         torch.tensor([[0.0, 0.5, 1.0]], dtype=torch.float32),
@@ -2597,6 +2735,20 @@ def test_viridis_error_map_clips_to_explicit_range() -> None:
     assert torch.equal(colors[0, 0], endpoints[0, 0])
     assert torch.equal(colors[0, 2], endpoints[0, 1])
     assert colors.dtype == torch.uint8
+
+
+def test_viridis_error_map_inverts_explicit_range() -> None:
+    values = torch.tensor([[0.25, 0.75]], dtype=torch.float32)
+
+    colors = viridis_error_map(values, value_range=(0.25, 0.75))
+    inverted = viridis_error_map(
+        values,
+        value_range=(0.25, 0.75),
+        invert=True,
+    )
+
+    assert torch.equal(inverted[0, 0], colors[0, 1])
+    assert torch.equal(inverted[0, 1], colors[0, 0])
 
 
 def test_training_viewer_error_map_returns_placeholder_before_snapshot() -> (

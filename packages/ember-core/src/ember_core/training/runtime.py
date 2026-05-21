@@ -1187,6 +1187,16 @@ def _consume_step_diagnostics(state: TrainState) -> dict[str, float]:
     }
 
 
+def _consume_step_histograms(state: TrainState) -> dict[str, object]:
+    diagnostics = getattr(state, "diagnostics", None)
+    if not isinstance(diagnostics, dict):
+        return {}
+    raw_values = diagnostics.pop("histograms", {})
+    if not isinstance(raw_values, dict):
+        return {}
+    return {str(name): value for name, value in raw_values.items()}
+
+
 def train_step(
     state: TrainState,
     batch: Any,
@@ -1585,8 +1595,13 @@ class DefaultTrainingRunner:
             metrics["iterations_per_second"] = 1.0 / step_duration_seconds
             if profiler is not None:
                 profiler.finish_step(state, metrics, profile)
+            histograms = _consume_step_histograms(state)
             if logger is not None:
-                logger.write_step(state.step, metrics)
+                logger.write_step(
+                    state.step,
+                    metrics,
+                    histograms=histograms,
+                )
             history.append(metrics)
         if logger is not None:
             logger.close()

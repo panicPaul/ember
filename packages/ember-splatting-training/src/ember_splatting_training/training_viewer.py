@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import atexit
 import html
+import math
 import threading
 import time
 import traceback
 import weakref
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass, replace
 from typing import Any, Literal
@@ -111,6 +112,32 @@ def _bind_viewer_close_to_training(handle: TrainingViewerHandle) -> None:
 TrainingViewerBackend = Literal["marimo_3dv", "viser"]
 TrainingViewRenderMode = Literal["color", "alpha", "depth", "normals"]
 TrainingViewDepthRangeMode = Literal["percentile", "absolute"]
+COMPACT_TRAINING_METRIC_NAMES: tuple[str, ...] = (
+    "loss",
+    "l1",
+    "ssim_loss",
+    "dssim",
+    "render_hit_count_q01",
+    "render_hit_count_q05",
+    "render_hit_count_q10",
+    "render_hit_count_q50",
+    "render_hit_count_mean",
+    "render_hit_count_max",
+    "render_hit_count_zero_fraction",
+    "render_hit_count_le_1_fraction",
+    "render_hit_count_le_2_fraction",
+    "render_hit_count_le_4_fraction",
+    "render_overflow_count_nonzero_fraction",
+    "degeneracy_quality_mean",
+    "degeneracy_below_floor_fraction",
+    "scene_degeneracy_quality_mean",
+    "scene_opacity_q50",
+    "scene_opacity_q99",
+    "scene_opacity_max",
+    "mcmc_pre_opacity_q50",
+    "mcmc_post_opacity_q50",
+    "mcmc_noise_translation_rms",
+)
 
 TRAINING_VIEW_RENDER_MODE_LABELS: dict[TrainingViewRenderMode, str] = {
     "color": "Color",
@@ -195,6 +222,7 @@ class TrainingViewerConfig:
     boost_min_update_seconds: float = 0.25
     show_progress: bool = True
     progress_every_steps: int = 10
+    verbose_metrics: bool = False
     wait_for_render: bool = False
     marimo_3dv: Marimo3DVViewerConfig = field(
         default_factory=lambda: Marimo3DVViewerConfig(
@@ -231,6 +259,27 @@ class TrainingViewerConfig:
             raise ValueError("viewer_backend must be 'marimo_3dv' or 'viser'.")
 
 
+def format_training_metric_parts(
+    metrics: Mapping[str, float],
+    *,
+    verbose_metrics: bool = False,
+) -> list[str]:
+    """Format training metrics for compact notebook status displays."""
+    if verbose_metrics:
+        items = sorted(metrics.items())
+    else:
+        items = (
+            (name, metrics[name])
+            for name in COMPACT_TRAINING_METRIC_NAMES
+            if name in metrics
+        )
+    return [
+        f"{name}={value:.6g}"
+        for name, value in items
+        if isinstance(value, int | float) and math.isfinite(float(value))
+    ]
+
+
 TrainingViewerStatus = Literal[
     "idle",
     "running",
@@ -255,7 +304,9 @@ _INSPECTOR_TRAINING_VIEW_KEY = "__training_view__"
 _INSPECTOR_SHOW_TRAINING_KEY = "__show_training__"
 _INSPECTOR_RENDER_MODE_KEY = "__render_mode__"
 _INSPECTOR_L1_RANGE_KEY = "__l1_range__"
+_INSPECTOR_IMAGE_LOSS_RANGE_KEY = "__image_loss_range__"
 _INSPECTOR_SSIM_RANGE_KEY = "__ssim_range__"
+_INSPECTOR_PSNR_RANGE_KEY = "__psnr_range__"
 _INSPECTOR_ALPHA_RANGE_KEY = "__alpha_range__"
 _INSPECTOR_DEPTH_RANGE_KEY = "__depth_range__"
 
@@ -525,9 +576,15 @@ class TrainingViewInspectorConfig:
     l1_range_bounds: tuple[float, float] = (0.0, 1.0)
     l1_range: tuple[float, float] = (0.0, 0.2)
     l1_range_step: float = 0.01
+    image_loss_range_bounds: tuple[float, float] = (0.0, 1.0)
+    image_loss_range: tuple[float, float] = (0.0, 0.2)
+    image_loss_range_step: float = 0.01
     ssim_range_bounds: tuple[float, float] = (0.0, 1.0)
     ssim_range: tuple[float, float] = (0.0, 0.2)
     ssim_range_step: float = 0.01
+    psnr_range_bounds: tuple[float, float] = (0.0, 100.0)
+    psnr_range: tuple[float, float] = (0.0, 40.0)
+    psnr_range_step: float = 1.0
     alpha_range_bounds: tuple[float, float] = (0.0, 1.0)
     alpha_range: tuple[float, float] = (0.0, 1.0)
     alpha_range_step: float = 0.01
@@ -546,10 +603,22 @@ class TrainingViewInspectorConfig:
             step=self.l1_range_step,
         )
         _validate_range_config(
+            "image_loss_range",
+            bounds=self.image_loss_range_bounds,
+            value=self.image_loss_range,
+            step=self.image_loss_range_step,
+        )
+        _validate_range_config(
             "ssim_range",
             bounds=self.ssim_range_bounds,
             value=self.ssim_range,
             step=self.ssim_range_step,
+        )
+        _validate_range_config(
+            "psnr_range",
+            bounds=self.psnr_range_bounds,
+            value=self.psnr_range,
+            step=self.psnr_range_step,
         )
         _validate_range_config(
             "alpha_range",
@@ -652,10 +721,20 @@ class TrainingViewInspection:
     l1_error: Float[Tensor, " height width"]
     l1_max: float
     l1_mean: float
+    image_loss_image: UInt8[Tensor, " height width 3"]
+    image_loss_error: Float[Tensor, " height width"]
+    image_loss_label: str
+    image_loss_max: float
+    image_loss_mean: float
     ssim_image: UInt8[Tensor, " height width 3"]
     ssim_error: Float[Tensor, " height width"]
     ssim_max: float
     ssim_mean: float
+    psnr_image: UInt8[Tensor, " height width 3"]
+    psnr: Float[Tensor, " height width"]
+    psnr_min: float
+    psnr_max: float
+    psnr_mean: float
     render_mode: TrainingViewRenderMode = "color"
     available_render_modes: tuple[TrainingViewRenderMode, ...] = ("color",)
     maps: tuple[TrainingViewMapResult, ...] = ()
@@ -675,7 +754,9 @@ class TrainingViewInspectorControls:
     show_training_view_button: Any
     render_mode_selector: Any
     l1_range_slider: Any
+    image_loss_range_slider: Any
     ssim_range_slider: Any
+    psnr_range_slider: Any
     alpha_range_slider: Any
     depth_range_slider: Any
 
@@ -746,6 +827,20 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
         return _range_control_value(
             self._control_value[_INSPECTOR_SSIM_RANGE_KEY],
             self.config.ssim_range,
+        )
+
+    def image_loss_value_range(self) -> tuple[float, float]:
+        """Return the selected image-loss visualization range."""
+        return _range_control_value(
+            self._control_value[_INSPECTOR_IMAGE_LOSS_RANGE_KEY],
+            self.config.image_loss_range,
+        )
+
+    def psnr_value_range(self) -> tuple[float, float]:
+        """Return the selected PSNR visualization range."""
+        return _range_control_value(
+            self._control_value[_INSPECTOR_PSNR_RANGE_KEY],
+            self.config.psnr_range,
         )
 
     def alpha_value_range(self) -> tuple[float, float]:
@@ -846,7 +941,9 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
             frame_view_catalog,
             view_ref,
             value_range=self.l1_value_range(),
+            image_loss_value_range=self.image_loss_value_range(),
             ssim_value_range=self.ssim_value_range(),
+            psnr_value_range=self.psnr_value_range(),
             alpha_value_range=self.alpha_value_range(),
             depth_value_range=self.depth_value_range(),
             depth_range_mode=self.config.depth_range_mode,
@@ -1149,7 +1246,9 @@ class TrainingViewerHandle:
         sample: PreparedFrameSample,
         *,
         value_range: tuple[float, float] | None = None,
+        image_loss_value_range: tuple[float, float] | None = None,
         ssim_value_range: tuple[float, float] | None = None,
+        psnr_value_range: tuple[float, float] | None = None,
         alpha_value_range: tuple[float, float] | None = None,
         depth_value_range: tuple[float, float] | None = None,
         depth_range_mode: TrainingViewDepthRangeMode = "percentile",
@@ -1161,6 +1260,7 @@ class TrainingViewerHandle:
             state = self._render_state
             render_fn = self._render_fn
             render_step = self._render_step
+            training_config = self._training_config
         if state is None or render_fn is None:
             return _placeholder_inspection(sample)
 
@@ -1168,7 +1268,9 @@ class TrainingViewerHandle:
             sample,
             render_step=render_step,
             value_range=value_range,
+            image_loss_value_range=image_loss_value_range,
             ssim_value_range=ssim_value_range,
+            psnr_value_range=psnr_value_range,
             alpha_value_range=alpha_value_range,
             depth_value_range=depth_value_range,
             depth_range_mode=depth_range_mode,
@@ -1199,6 +1301,25 @@ class TrainingViewerHandle:
                 )
             l1_error = (prediction - target).abs().mean(dim=-1)
             ssim_error = ssim_error_map(prediction, target)
+            (
+                lambda_l1,
+                lambda_ssim,
+                ssim_error_scale,
+                ssim_label,
+            ) = training_view_image_loss_terms(training_config)
+            image_loss = image_loss_error_map(
+                l1_error,
+                ssim_error,
+                lambda_l1=lambda_l1,
+                lambda_ssim=lambda_ssim,
+                ssim_error_scale=ssim_error_scale,
+            )
+            image_loss_label = image_loss_label_for_terms(
+                lambda_l1,
+                lambda_ssim,
+                ssim_label,
+            )
+            psnr_values = psnr_map(prediction, target)
             available_modes = available_training_view_render_modes(
                 render_output,
                 prediction,
@@ -1224,7 +1345,9 @@ class TrainingViewerHandle:
                 snapshot=snapshot,
             )
             l1_max, l1_mean = _scalar_max_mean(l1_error)
+            image_loss_max, image_loss_mean = _scalar_max_mean(image_loss)
             ssim_max, ssim_mean = _scalar_max_mean(ssim_error)
+            psnr_min, psnr_max, psnr_mean = _scalar_min_max_mean(psnr_values)
             inspection = TrainingViewInspection(
                 target_image=_display_image_to_uint8(target),
                 prediction_image=_display_image_to_uint8(prediction),
@@ -1241,6 +1364,15 @@ class TrainingViewerHandle:
                 l1_error=l1_error.detach().cpu(),
                 l1_max=l1_max,
                 l1_mean=l1_mean,
+                image_loss_image=viridis_error_map(
+                    image_loss,
+                    quantile=1.0,
+                    value_range=image_loss_value_range,
+                ),
+                image_loss_error=image_loss.detach().cpu(),
+                image_loss_label=image_loss_label,
+                image_loss_max=image_loss_max,
+                image_loss_mean=image_loss_mean,
                 ssim_image=viridis_error_map(
                     ssim_error,
                     quantile=1.0,
@@ -1249,6 +1381,16 @@ class TrainingViewerHandle:
                 ssim_error=ssim_error.detach().cpu(),
                 ssim_max=ssim_max,
                 ssim_mean=ssim_mean,
+                psnr_image=viridis_error_map(
+                    psnr_values,
+                    quantile=1.0,
+                    value_range=psnr_value_range,
+                    invert=True,
+                ),
+                psnr=psnr_values.detach().cpu(),
+                psnr_min=psnr_min or 0.0,
+                psnr_max=psnr_max or 0.0,
+                psnr_mean=psnr_mean or 0.0,
                 render_mode=resolved_render_mode,
                 available_render_modes=available_modes,
                 maps=tuple(
@@ -1679,6 +1821,21 @@ def create_training_view_inspector(
         show_value=True,
         full_width=True,
     )
+    image_loss_start, image_loss_stop = sorted(
+        (
+            float(inspector_config.image_loss_range_bounds[0]),
+            float(inspector_config.image_loss_range_bounds[1]),
+        )
+    )
+    image_loss_range_slider = mo.ui.range_slider(
+        start=image_loss_start,
+        stop=image_loss_stop,
+        step=inspector_config.image_loss_range_step,
+        value=tuple(sorted(inspector_config.image_loss_range)),
+        label="Image loss range",
+        show_value=True,
+        full_width=True,
+    )
     ssim_start, ssim_stop = sorted(
         (
             float(inspector_config.ssim_range_bounds[0]),
@@ -1691,6 +1848,21 @@ def create_training_view_inspector(
         step=inspector_config.ssim_range_step,
         value=tuple(sorted(inspector_config.ssim_range)),
         label="SSIM error range",
+        show_value=True,
+        full_width=True,
+    )
+    psnr_start, psnr_stop = sorted(
+        (
+            float(inspector_config.psnr_range_bounds[0]),
+            float(inspector_config.psnr_range_bounds[1]),
+        )
+    )
+    psnr_range_slider = mo.ui.range_slider(
+        start=psnr_start,
+        stop=psnr_stop,
+        step=inspector_config.psnr_range_step,
+        value=tuple(sorted(inspector_config.psnr_range)),
+        label="PSNR range",
         show_value=True,
         full_width=True,
     )
@@ -1743,10 +1915,21 @@ def create_training_view_inspector(
             gap=0.75,
         ),
         render_mode_selector,
-        l1_range_slider,
-        ssim_range_slider,
-        alpha_range_slider,
-        depth_range_slider,
+        mo.hstack(
+            [l1_range_slider, image_loss_range_slider],
+            widths="equal",
+            gap=0.75,
+        ),
+        mo.hstack(
+            [ssim_range_slider, psnr_range_slider],
+            widths="equal",
+            gap=0.75,
+        ),
+        mo.hstack(
+            [alpha_range_slider, depth_range_slider],
+            widths="equal",
+            gap=0.75,
+        ),
     ]
     controls_view = mo.vstack(
         controls,
@@ -1762,7 +1945,9 @@ def create_training_view_inspector(
             show_training_view_button=show_training_view_button,
             render_mode_selector=render_mode_selector,
             l1_range_slider=l1_range_slider,
+            image_loss_range_slider=image_loss_range_slider,
             ssim_range_slider=ssim_range_slider,
+            psnr_range_slider=psnr_range_slider,
             alpha_range_slider=alpha_range_slider,
             depth_range_slider=depth_range_slider,
         ),
@@ -1773,7 +1958,9 @@ def create_training_view_inspector(
             _INSPECTOR_SHOW_TRAINING_KEY: show_training_view_button,
             _INSPECTOR_RENDER_MODE_KEY: render_mode_selector,
             _INSPECTOR_L1_RANGE_KEY: l1_range_slider,
+            _INSPECTOR_IMAGE_LOSS_RANGE_KEY: image_loss_range_slider,
             _INSPECTOR_SSIM_RANGE_KEY: ssim_range_slider,
+            _INSPECTOR_PSNR_RANGE_KEY: psnr_range_slider,
             _INSPECTOR_ALPHA_RANGE_KEY: alpha_range_slider,
             _INSPECTOR_DEPTH_RANGE_KEY: depth_range_slider,
         },
@@ -1786,7 +1973,9 @@ def render_training_view_inspector(
     view_ref: Any | None,
     *,
     value_range: tuple[float, float] | None = None,
+    image_loss_value_range: tuple[float, float] | None = None,
     ssim_value_range: tuple[float, float] | None = None,
+    psnr_value_range: tuple[float, float] | None = None,
     alpha_value_range: tuple[float, float] | None = None,
     depth_value_range: tuple[float, float] | None = None,
     depth_range_mode: TrainingViewDepthRangeMode = "percentile",
@@ -1803,7 +1992,9 @@ def render_training_view_inspector(
         inspection = handle.inspect_view(
             sample,
             value_range=value_range,
+            image_loss_value_range=image_loss_value_range,
             ssim_value_range=ssim_value_range,
+            psnr_value_range=psnr_value_range,
             alpha_value_range=alpha_value_range,
             depth_value_range=depth_value_range,
             depth_range_mode=depth_range_mode,
@@ -1847,6 +2038,26 @@ def render_training_view_inspector(
                 ),
             )
         )
+    images.append(
+        mo.image(
+            inspection.image_loss_image.numpy(),
+            caption=(
+                f"{inspection.image_loss_label} mean "
+                f"{inspection.image_loss_mean:.5f} | "
+                f"max {inspection.image_loss_max:.5f}"
+            ),
+        )
+    )
+    images.append(
+        mo.image(
+            inspection.psnr_image.numpy(),
+            caption=(
+                f"PSNR mean {inspection.psnr_mean:.2f} dB | "
+                f"min {inspection.psnr_min:.2f} | "
+                f"max {inspection.psnr_max:.2f}"
+            ),
+        )
+    )
     images.extend(
         mo.image(
             result.image.numpy(),
@@ -2198,10 +2409,20 @@ def _placeholder_inspection(
         l1_error=torch.zeros((height, width), dtype=torch.float32),
         l1_max=0.0,
         l1_mean=0.0,
+        image_loss_image=placeholder,
+        image_loss_error=torch.zeros((height, width), dtype=torch.float32),
+        image_loss_label="Image loss",
+        image_loss_max=0.0,
+        image_loss_mean=0.0,
         ssim_image=placeholder,
         ssim_error=torch.zeros((height, width), dtype=torch.float32),
         ssim_max=0.0,
         ssim_mean=0.0,
+        psnr_image=placeholder,
+        psnr=torch.zeros((height, width), dtype=torch.float32),
+        psnr_min=0.0,
+        psnr_max=0.0,
+        psnr_mean=0.0,
         render_step=None,
         available=False,
     )
@@ -2338,6 +2559,101 @@ def ssim_error_map(
         0.0,
         1.0,
     )
+
+
+def psnr_map(
+    prediction: Float[Tensor, " height width channels"],
+    target: Float[Tensor, " height width channels"],
+    *,
+    eps: float = 1.0e-10,
+) -> Float[Tensor, " height width"]:
+    """Return per-pixel RGB PSNR in dB for two normalized HWC images."""
+    if prediction.shape != target.shape:
+        raise ValueError(
+            "PSNR map expects prediction and target to share HWC shape, got "
+            f"{tuple(prediction.shape)} and {tuple(target.shape)}."
+        )
+    if prediction.ndim != 3 or int(prediction.shape[-1]) != 3:
+        raise ValueError(
+            "PSNR map expects one HWC RGB image, got "
+            f"shape {tuple(prediction.shape)}."
+        )
+    mse = (prediction.to(torch.float32) - target.to(torch.float32)).square()
+    mse = mse.mean(dim=-1).clamp_min(float(eps))
+    return -10.0 * torch.log10(mse)
+
+
+def training_view_image_loss_terms(
+    training_config: TrainingConfig | None,
+) -> tuple[float, float, float, str]:
+    """Return L1 and SSIM-family terms for the default image-loss map."""
+    loss = getattr(training_config, "loss", None)
+    target = getattr(loss, "target", None)
+    kwargs = getattr(target, "kwargs", {})
+    if not isinstance(kwargs, dict):
+        kwargs = {}
+    lambda_l1 = float(kwargs.get("lambda_l1", kwargs.get("lambda_photo", 1.0)))
+    if "lambda_ssim" in kwargs:
+        return lambda_l1, float(kwargs["lambda_ssim"]), 2.0, "SSIM"
+    if "lambda_dssim" in kwargs:
+        target_name = str(getattr(target, "target", ""))
+        ssim_scale = (
+            2.0
+            if target_name.endswith("ssim_loss")
+            and not target_name.endswith("dssim_loss")
+            else 1.0
+        )
+        label = "SSIM" if ssim_scale == 2.0 else "DSSIM"
+        return lambda_l1, float(kwargs["lambda_dssim"]), ssim_scale, label
+    return lambda_l1, 0.0, 2.0, "SSIM"
+
+
+def image_loss_error_map(
+    l1_error: Float[Tensor, " height width"],
+    dssim_error: Float[Tensor, " valid_height valid_width"],
+    *,
+    lambda_l1: float = 1.0,
+    lambda_ssim: float = 0.0,
+    ssim_error_scale: float = 2.0,
+) -> Float[Tensor, " map_height map_width"]:
+    """Return the default pixel image-loss map from L1 and SSIM terms."""
+    l1 = l1_error.to(torch.float32)
+    if lambda_ssim <= 0.0 or int(dssim_error.numel()) == 0:
+        return float(lambda_l1) * l1
+    structural = float(ssim_error_scale) * dssim_error.to(
+        dtype=l1.dtype,
+        device=l1.device,
+    )
+    cropped_l1 = crop_scalar_map_to(l1, structural.shape)
+    return float(lambda_l1) * cropped_l1 + float(lambda_ssim) * structural
+
+
+def image_loss_label_for_terms(
+    lambda_l1: float,
+    lambda_ssim: float,
+    ssim_label: str,
+) -> str:
+    """Return a compact label for the default image-loss map."""
+    if lambda_ssim <= 0.0:
+        return f"Image loss | {lambda_l1:g} L1"
+    return f"Image loss | {lambda_l1:g} L1 + {lambda_ssim:g} {ssim_label}"
+
+
+def crop_scalar_map_to(
+    values: Float[Tensor, " height width"],
+    shape: Sequence[int],
+) -> Float[Tensor, " target_height target_width"]:
+    """Center-crop a scalar map to the requested 2D shape."""
+    target_height = int(shape[0])
+    target_width = int(shape[1])
+    if target_height == 0 or target_width == 0:
+        return values.new_empty((target_height, target_width))
+    crop_top = max(0, (int(values.shape[0]) - target_height) // 2)
+    crop_left = max(0, (int(values.shape[1]) - target_width) // 2)
+    return values[
+        crop_top : crop_top + target_height,
+        crop_left : crop_left + target_width,
+    ]
 
 
 def _ssim_window(
@@ -2575,7 +2891,9 @@ def _inspection_cache_key(
     *,
     render_step: int | None,
     value_range: tuple[float, float] | None,
+    image_loss_value_range: tuple[float, float] | None,
     ssim_value_range: tuple[float, float] | None,
+    psnr_value_range: tuple[float, float] | None,
     alpha_value_range: tuple[float, float] | None,
     depth_value_range: tuple[float, float] | None,
     depth_range_mode: TrainingViewDepthRangeMode,
@@ -2598,7 +2916,9 @@ def _inspection_cache_key(
         tuple(sample.image.shape),
         render_step,
         value_range,
+        image_loss_value_range,
         ssim_value_range,
+        psnr_value_range,
         alpha_value_range,
         depth_value_range,
         depth_range_mode,
@@ -2744,6 +3064,7 @@ def viridis_error_map(
     *,
     quantile: float = 0.98,
     value_range: tuple[float, float] | None = None,
+    invert: bool = False,
 ) -> UInt8[Tensor, " height width 3"]:
     """Map a scalar error image to RGB with a viridis-like color ramp."""
     error_cpu = torch.nan_to_num(
@@ -2768,6 +3089,8 @@ def viridis_error_map(
             scale = finite.amax()
         scale = torch.clamp(scale, min=1e-8)
         normalized = torch.clamp(error_cpu / scale, 0.0, 1.0)
+    if invert:
+        normalized = 1.0 - normalized
     return _apply_viridis(normalized)
 
 
@@ -2820,6 +3143,7 @@ def _dc_only_model_for_render(model: Any) -> Any:
 
 
 __all__ = [
+    "COMPACT_TRAINING_METRIC_NAMES",
     "TRAINING_VIEW_RENDER_MODES",
     "TRAINING_VIEW_RENDER_MODE_LABELS",
     "TrainingPreparationHandle",
@@ -2845,11 +3169,17 @@ __all__ = [
     "create_training_run",
     "create_training_view_inspector",
     "create_training_viewer",
+    "crop_scalar_map_to",
+    "format_training_metric_parts",
+    "image_loss_error_map",
+    "image_loss_label_for_terms",
+    "psnr_map",
     "render_training_preparation_status",
     "render_training_view_inspector",
     "ssim_error_map",
     "training_inspector_spinner",
     "training_preparation_outputs",
+    "training_view_image_loss_terms",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",
     "viridis_error_map",

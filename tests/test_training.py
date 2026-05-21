@@ -61,6 +61,7 @@ from ember_core.training import (
     LoadedCheckpoint,
     LossResult,
     RuntimeContextRef,
+    TensorBoardTrainingLogger,
     TrainingConfig,
     TrainingHookBindContext,
     TrainingLoggingConfig,
@@ -82,6 +83,7 @@ from ember_core.training import (
     cycle_dataloader,
     densification_config,
     ensure_checkpoint_output_writable,
+    histogram_tag_for_metric,
     initialize_model,
     load_checkpoint_dir,
     loss_config,
@@ -92,6 +94,7 @@ from ember_core.training import (
     resolve_backend_options,
     run_training,
     save_checkpoint_dir,
+    scalar_tag_for_metric,
     scene_parameter,
     set_torch_seed,
     tensor_slice,
@@ -1237,6 +1240,88 @@ def test_run_training_logging_can_be_disabled(tmp_path: Path) -> None:
 
     assert "iterations_per_second" in result.history[-1]
     assert not (Path(result.checkpoint_dir) / "logs").exists()
+
+
+class _FakeSummaryWriter:
+    def __init__(self) -> None:
+        self.scalars: list[tuple[str, float, int]] = []
+        self.histograms: list[tuple[str, torch.Tensor, int]] = []
+
+    def add_scalar(
+        self,
+        tag: str,
+        scalar_value: float,
+        *,
+        global_step: int,
+    ) -> None:
+        self.scalars.append((tag, float(scalar_value), global_step))
+
+    def add_histogram(
+        self,
+        tag: str,
+        values: torch.Tensor,
+        *,
+        global_step: int,
+    ) -> None:
+        self.histograms.append((tag, values.detach().clone(), global_step))
+
+
+def test_tensorboard_logger_groups_hit_count_histograms(tmp_path: Path) -> None:
+    logger = TensorBoardTrainingLogger(
+        TrainingLoggingConfig(enabled=False, log_every=2),
+        checkpoint_dir=tmp_path,
+    )
+    writer = _FakeSummaryWriter()
+    logger._writer = writer
+
+    logger.write_step(
+        2,
+        {
+            "loss": 1.0,
+            "render_hit_count_q05": 0.0,
+            "render_overflow_count_nonzero_fraction": 0.25,
+            "scene_opacity_q50": 0.1,
+            "collapse_loss_abs": 0.0,
+        },
+        histograms={
+            "render_hit_count": torch.tensor([0.0, 1.0, float("nan"), 4.0]),
+            "empty": torch.tensor([float("nan")]),
+        },
+    )
+
+    scalar_tags = {tag for tag, _, _ in writer.scalars}
+    assert scalar_tag_for_metric("render_hit_count_q05") in scalar_tags
+    assert scalar_tag_for_metric("render_overflow_count_nonzero_fraction") in (
+        scalar_tags
+    )
+    assert scalar_tag_for_metric("scene_opacity_q50") in scalar_tags
+    assert scalar_tag_for_metric("collapse_loss_abs") in scalar_tags
+    assert writer.histograms[0][0] == histogram_tag_for_metric("render_hit_count")
+    torch.testing.assert_close(
+        writer.histograms[0][1],
+        torch.tensor([0.0, 1.0, 4.0]),
+    )
+    assert len(writer.histograms) == 1
+
+
+def test_tensorboard_logger_skips_histograms_between_log_steps(
+    tmp_path: Path,
+) -> None:
+    logger = TensorBoardTrainingLogger(
+        TrainingLoggingConfig(enabled=False, log_every=10),
+        checkpoint_dir=tmp_path,
+    )
+    writer = _FakeSummaryWriter()
+    logger._writer = writer
+
+    logger.write_step(
+        3,
+        {"loss": 1.0, "elapsed_seconds": 2.0},
+        histograms={"render_hit_count": torch.ones(4)},
+    )
+
+    assert writer.histograms == []
+    assert writer.scalars == [("time/elapsed_seconds", 2.0, 3)]
 
 
 def test_run_training_profiler_records_phase_metrics(
