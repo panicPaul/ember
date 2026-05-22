@@ -226,40 +226,11 @@ def test_fastgs_script_loader_replays_json_config(tmp_path: Path) -> None:
     assert loaded == config
 
 
-def test_fastgs_scene_loader_materializes_resized_image_cache(
-    monkeypatch: pytest.MonkeyPatch,
+def test_fastgs_configs_wire_shared_resized_image_cache(
     tmp_path: Path,
 ) -> None:
     module = load_fastgs_config_module()
     scene_path = tmp_path / "garden"
-    prebuilt_image_root = scene_path / "images_4"
-    prebuilt_image_root.mkdir(parents=True)
-    calls: list[dict[str, object]] = []
-
-    def fake_materialize_fastgs_resized_image_cache(
-        *,
-        source_root: Path,
-        cache_root: Path,
-        scale: float,
-        interpolation: str,
-        max_caches: int,
-    ) -> Path:
-        calls.append(
-            {
-                "source_root": source_root,
-                "cache_root": cache_root,
-                "scale": scale,
-                "interpolation": interpolation,
-                "max_caches": max_caches,
-            }
-        )
-        return cache_root
-
-    monkeypatch.setattr(
-        module,
-        "materialize_fastgs_resized_image_cache",
-        fake_materialize_fastgs_resized_image_cache,
-    )
     config = load_fastgs_preset(module, "garden_base").model_copy(
         update={
             "scene": module.FastGSSceneConfig(path=scene_path),
@@ -267,19 +238,16 @@ def test_fastgs_scene_loader_materializes_resized_image_cache(
     )
 
     scene_config = module.build_scene_load_config(config)
+    dataset_config = module.build_prepared_frame_dataset_config(config)
 
-    assert scene_config.image_root == (
-        scene_path / "ember_cache/resized_images/scale_0p25_bicubic"
-    )
-    assert calls == [
-        {
-            "source_root": scene_path / "images",
-            "cache_root": scene_config.image_root,
-            "scale": 0.25,
-            "interpolation": "bicubic",
-            "max_caches": 4,
-        }
-    ]
+    assert scene_config.image_root is None
+    assert dataset_config.image_preparation is not None
+    assert dataset_config.image_preparation.resize_width_scale == 0.25
+    cache_config = dataset_config.image_preparation.resized_image_cache
+    assert cache_config is not None
+    assert cache_config.enabled is True
+    assert cache_config.cache_root is None
+    assert cache_config.max_caches == 4
 
 
 def test_fastgs_l1_metric_map_matches_normalized_l1_formula() -> None:

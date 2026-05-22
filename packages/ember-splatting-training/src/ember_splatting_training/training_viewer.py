@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import html
+import json
 import math
 import threading
 import time
@@ -13,6 +14,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field, is_dataclass, replace
 from os import PathLike
+from pathlib import Path
 from typing import Any, Literal
 
 import marimo as mo
@@ -135,6 +137,7 @@ COMPACT_TRAINING_METRIC_NAMES: tuple[str, ...] = (
     "scene_opacity_q50",
     "scene_opacity_q99",
     "scene_opacity_max",
+    "mcmc_relocated_count",
     "mcmc_pre_opacity_q50",
     "mcmc_post_opacity_q50",
     "mcmc_noise_translation_rms",
@@ -305,8 +308,14 @@ TrainingPreparationPhase = Literal["loading_scene", "preparing_views"]
 
 _INSPECTOR_VALIDATION_VIEW_KEY = "__validation_view__"
 _INSPECTOR_SHOW_VALIDATION_KEY = "__show_validation__"
+_INSPECTOR_PREVIOUS_VALIDATION_KEY = "__previous_validation__"
+_INSPECTOR_NEXT_VALIDATION_KEY = "__next_validation__"
+_INSPECTOR_STAR_VALIDATION_KEY = "__star_validation__"
 _INSPECTOR_TRAINING_VIEW_KEY = "__training_view__"
 _INSPECTOR_SHOW_TRAINING_KEY = "__show_training__"
+_INSPECTOR_PREVIOUS_TRAINING_KEY = "__previous_training__"
+_INSPECTOR_NEXT_TRAINING_KEY = "__next_training__"
+_INSPECTOR_STAR_TRAINING_KEY = "__star_training__"
 _INSPECTOR_RENDER_MODE_KEY = "__render_mode__"
 _INSPECTOR_L1_RANGE_KEY = "__l1_range__"
 _INSPECTOR_IMAGE_LOSS_RANGE_KEY = "__image_loss_range__"
@@ -314,6 +323,18 @@ _INSPECTOR_SSIM_RANGE_KEY = "__ssim_range__"
 _INSPECTOR_PSNR_RANGE_KEY = "__psnr_range__"
 _INSPECTOR_ALPHA_RANGE_KEY = "__alpha_range__"
 _INSPECTOR_DEPTH_RANGE_KEY = "__depth_range__"
+_INSPECTOR_BUTTON_KEYS = frozenset(
+    {
+        _INSPECTOR_SHOW_VALIDATION_KEY,
+        _INSPECTOR_PREVIOUS_VALIDATION_KEY,
+        _INSPECTOR_NEXT_VALIDATION_KEY,
+        _INSPECTOR_STAR_VALIDATION_KEY,
+        _INSPECTOR_SHOW_TRAINING_KEY,
+        _INSPECTOR_PREVIOUS_TRAINING_KEY,
+        _INSPECTOR_NEXT_TRAINING_KEY,
+        _INSPECTOR_STAR_TRAINING_KEY,
+    }
+)
 
 
 class TrainingViewerCancelled(RuntimeError):
@@ -362,6 +383,7 @@ class TrainingViewerSnapshot:
     primitive_count: int | None = None
     result: TrainingResult | None = None
     error_text: str | None = None
+    render_error_text: str | None = None
 
 
 def format_training_duration(seconds: float) -> str:
@@ -428,9 +450,15 @@ def format_training_status(
         if getattr(snapshot, "eta_seconds", None) is not None
         else "ETA --"
     )
+    render_error_text = getattr(snapshot, "render_error_text", None)
     return (
         f"{status_text}: `{step_text}` {speed_text} {elapsed_text} {eta_text}"
         + (f"\n\n{metric_text}" if metric_text else "")
+        + (
+            f"\n\nRender preview warning: `{render_error_text}`"
+            if render_error_text
+            else ""
+        )
     )
 
 
@@ -869,6 +897,8 @@ class TrainingViewerErrorMap:
 class TrainingViewInspectorConfig:
     """Notebook controls for fixed-view training inspection."""
 
+    enable_starred_views: bool = True
+    starred_views_path: Path | str | None = None
     l1_range_bounds: tuple[float, float] = (0.0, 1.0)
     l1_range: tuple[float, float] = (0.0, 0.2)
     l1_range_step: float = 0.01
@@ -1055,6 +1085,12 @@ class TrainingViewInspectorControls:
     psnr_range_slider: Any
     alpha_range_slider: Any
     depth_range_slider: Any
+    validation_previous_button: Any | None = None
+    validation_next_button: Any | None = None
+    validation_star_button: Any | None = None
+    training_previous_button: Any | None = None
+    training_next_button: Any | None = None
+    training_star_button: Any | None = None
 
 
 class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
@@ -1068,12 +1104,14 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
         config: TrainingViewInspectorConfig,
         controls: TrainingViewInspectorControls,
         elements: dict[str, Any],
+        active_view_key: Callable[[], str | None] | None = None,
     ) -> None:
         self.config = config
         self.controls = controls
         self._elements = elements
+        self._active_view_key_getter = active_view_key
         self._active_view_key: str | None = None
-        self._processed_show_counts = (0, 0)
+        self._processed_button_counts: dict[str, int] = {}
         initial_frontend_value = self._current_frontend_value()
         self._control_value = self._control_value_from_frontend(
             initial_frontend_value
@@ -1095,8 +1133,18 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
 
     def selected_view_ref(self, frame_view_catalog: Any) -> Any | None:
         """Return the current selected train/validation view reference."""
-        selected_key = self._active_view_key
+        selected_key = (
+            self._active_view_key_getter()
+            if self._active_view_key_getter is not None
+            else self._active_view_key
+        )
         selected_view = _view_ref_from_key(frame_view_catalog, selected_key)
+        if selected_view is not None:
+            return selected_view
+        selected_view = _view_ref_from_key(
+            frame_view_catalog,
+            self._active_view_key,
+        )
         if selected_view is not None:
             return selected_view
         selected_view = _view_ref_from_key(
@@ -1174,10 +1222,7 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
                 frontend_value = value[name]
             else:
                 frontend_value = _current_element_frontend_value(element)
-            if name in {
-                _INSPECTOR_SHOW_VALIDATION_KEY,
-                _INSPECTOR_SHOW_TRAINING_KEY,
-            }:
+            if name in _INSPECTOR_BUTTON_KEYS:
                 next_value[name] = _button_count_from_frontend(frontend_value)
             else:
                 next_value[name] = element._convert_value(frontend_value)
@@ -1195,27 +1240,46 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
                 **value,
             }
         )
+        previous_validation_key = self._control_value.get(
+            _INSPECTOR_VALIDATION_VIEW_KEY
+        )
+        previous_training_key = self._control_value.get(
+            _INSPECTOR_TRAINING_VIEW_KEY
+        )
+        next_validation_key = next_value.get(_INSPECTOR_VALIDATION_VIEW_KEY)
+        next_training_key = next_value.get(_INSPECTOR_TRAINING_VIEW_KEY)
+        if next_validation_key != previous_validation_key:
+            self._active_view_key = str(next_validation_key)
+        if next_training_key != previous_training_key:
+            self._active_view_key = str(next_training_key)
         validation_count = int(
             next_value.get(_INSPECTOR_SHOW_VALIDATION_KEY) or 0
         )
         training_count = int(next_value.get(_INSPECTOR_SHOW_TRAINING_KEY) or 0)
-        processed_validation_count, processed_training_count = (
-            self._processed_show_counts
+        processed_validation_count = self._processed_button_counts.get(
+            _INSPECTOR_SHOW_VALIDATION_KEY,
+            0,
+        )
+        processed_training_count = self._processed_button_counts.get(
+            _INSPECTOR_SHOW_TRAINING_KEY,
+            0,
         )
         if validation_count > processed_validation_count:
             self._active_view_key = str(
                 next_value[_INSPECTOR_VALIDATION_VIEW_KEY]
             )
-            processed_validation_count = validation_count
         if training_count > processed_training_count:
             self._active_view_key = str(
                 next_value[_INSPECTOR_TRAINING_VIEW_KEY]
             )
-            processed_training_count = training_count
-        self._processed_show_counts = (
-            processed_validation_count,
-            processed_training_count,
+        self._processed_button_counts[_INSPECTOR_SHOW_VALIDATION_KEY] = (
+            validation_count
         )
+        self._processed_button_counts[_INSPECTOR_SHOW_TRAINING_KEY] = (
+            training_count
+        )
+        for name in _INSPECTOR_BUTTON_KEYS:
+            self._processed_button_counts[name] = int(next_value.get(name) or 0)
         self._control_value = next_value
         return next_value
 
@@ -1253,6 +1317,49 @@ class TrainingViewInspector(UIElement[dict[str, JSONType], dict[str, Any]]):
 
 
 @dataclass
+class TrainingViewInspectionRequest:
+    """Pending fixed-view inspection render owned by the training thread."""
+
+    sample: PreparedFrameSample
+    value_range: tuple[float, float] | None
+    image_loss_value_range: tuple[float, float] | None
+    ssim_value_range: tuple[float, float] | None
+    psnr_value_range: tuple[float, float] | None
+    alpha_value_range: tuple[float, float] | None
+    depth_value_range: tuple[float, float] | None
+    depth_range_mode: TrainingViewDepthRangeMode
+    render_mode: TrainingViewRenderMode
+    map_specs: Sequence[TrainingViewMapSpec]
+    event: threading.Event = field(
+        default_factory=threading.Event,
+        init=False,
+        repr=False,
+    )
+    result: TrainingViewInspection | None = field(
+        default=None,
+        init=False,
+        repr=False,
+    )
+    error: BaseException | None = field(default=None, init=False, repr=False)
+    superseded: bool = field(default=False, init=False, repr=False)
+
+    def resolve(self, result: TrainingViewInspection) -> None:
+        """Publish a completed inspection result to the waiting caller."""
+        self.result = result
+        self.event.set()
+
+    def fail(self, error: BaseException) -> None:
+        """Publish an inspection failure to the waiting caller."""
+        self.error = error
+        self.event.set()
+
+    def supersede(self) -> None:
+        """Mark this request as replaced by a newer inspection request."""
+        self.superseded = True
+        self.event.set()
+
+
+@dataclass
 class TrainingViewerHandle:
     """Live viewer plus runtime hooks for a training run."""
 
@@ -1282,6 +1389,9 @@ class TrainingViewerHandle:
     )
     _result: TrainingResult | None = field(default=None, init=False, repr=False)
     _error_text: str | None = field(default=None, init=False, repr=False)
+    _render_error_text: str | None = field(
+        default=None, init=False, repr=False
+    )
     _latest_metrics: dict[str, float] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -1306,6 +1416,9 @@ class TrainingViewerHandle:
         default=None, init=False, repr=False
     )
     _inspection_cache: TrainingViewInspection | None = field(
+        default=None, init=False, repr=False
+    )
+    _pending_inspection: TrainingViewInspectionRequest | None = field(
         default=None, init=False, repr=False
     )
 
@@ -1358,9 +1471,12 @@ class TrainingViewerHandle:
                     self._training_config,
                     state,
                 )
-            should_render_initial = not had_state and self.config.enabled
-        if should_render_initial:
-            self.update_render_snapshot(state)
+            should_render_initial = (
+                self.viewer is not None
+                and not had_state
+                and self.config.enabled
+            )
+        if should_render_initial and self.update_render_snapshot(state):
             self.rerender(force=True, step=state.step)
 
     def start_training(
@@ -1391,6 +1507,7 @@ class TrainingViewerHandle:
             self._status = "running"
             self._result = None
             self._error_text = None
+            self._render_error_text = None
             self._stop_requested.clear()
             self._state = None
             self._render_state = None
@@ -1412,6 +1529,9 @@ class TrainingViewerHandle:
             self._boost_until = 0.0
             self._inspection_cache_key = None
             self._inspection_cache = None
+            if self._pending_inspection is not None:
+                self._pending_inspection.supersede()
+                self._pending_inspection = None
             self._thread = threading.Thread(
                 target=self._run_training_thread,
                 args=(frame_dataset, resolved_training_config),
@@ -1473,22 +1593,35 @@ class TrainingViewerHandle:
             with self._lock:
                 self._status = "cancelled"
                 self._error_text = None
+                pending_inspection = self._pending_inspection
+                self._pending_inspection = None
+            if pending_inspection is not None:
+                pending_inspection.supersede()
             self.close_progress()
             return
         except Exception:
             with self._lock:
                 self._status = "failed"
                 self._error_text = traceback.format_exc().rstrip()
+                pending_inspection = self._pending_inspection
+                self._pending_inspection = None
+            if pending_inspection is not None:
+                pending_inspection.supersede()
             self.close_progress()
             return
+        with self._lock:
+            self._latest_step = result.state.step
+            self._latest_primitive_count = _primitive_count(result.state)
+        self.close_progress()
+        self.render_pending_inspection(result.state)
+        self.publish_live_render_state(result.state)
+        if self.viewer is not None and self.update_render_snapshot(result.state):
+            self.rerender(force=True, step=result.state.step)
         with self._lock:
             self._status = "complete"
             self._result = result
             self._latest_step = result.state.step
             self._latest_primitive_count = _primitive_count(result.state)
-        self.close_progress()
-        self.update_render_snapshot(result.state)
-        self.rerender(force=True, step=result.state.step)
 
     def snapshot(self) -> TrainingViewerSnapshot:
         """Return a thread-safe copy of the current training viewer state."""
@@ -1505,6 +1638,7 @@ class TrainingViewerHandle:
                 primitive_count=self._latest_primitive_count,
                 result=self._result,
                 error_text=self._error_text,
+                render_error_text=self._render_error_text,
             )
 
     def rerender(self, *, force: bool = False, step: int | None = None) -> None:
@@ -1557,7 +1691,37 @@ class TrainingViewerHandle:
         render_mode: TrainingViewRenderMode = "color",
         map_specs: Sequence[TrainingViewMapSpec] = (),
     ) -> TrainingViewInspection:
-        """Render one fixed dataset view from the latest training snapshot."""
+        """Render one fixed dataset view from the latest safe training state."""
+        cached = self._cached_inspection(
+            sample,
+            value_range=value_range,
+            image_loss_value_range=image_loss_value_range,
+            ssim_value_range=ssim_value_range,
+            psnr_value_range=psnr_value_range,
+            alpha_value_range=alpha_value_range,
+            depth_value_range=depth_value_range,
+            depth_range_mode=depth_range_mode,
+            render_mode=render_mode,
+            map_specs=map_specs,
+        )
+        if cached is not None:
+            return cached
+        if self._should_queue_inspection_request():
+            request = TrainingViewInspectionRequest(
+                sample=sample,
+                value_range=value_range,
+                image_loss_value_range=image_loss_value_range,
+                ssim_value_range=ssim_value_range,
+                psnr_value_range=psnr_value_range,
+                alpha_value_range=alpha_value_range,
+                depth_value_range=depth_value_range,
+                depth_range_mode=depth_range_mode,
+                render_mode=render_mode,
+                map_specs=map_specs,
+            )
+            self.queue_training_view_inspection(request)
+            return self._wait_for_training_view_inspection(request)
+
         with self._lock:
             state = self._render_state
             render_fn = self._render_fn
@@ -1565,7 +1729,51 @@ class TrainingViewerHandle:
             training_config = self._training_config
         if state is None or render_fn is None:
             return _placeholder_inspection(sample)
+        request = TrainingViewInspectionRequest(
+            sample=sample,
+            value_range=value_range,
+            image_loss_value_range=image_loss_value_range,
+            ssim_value_range=ssim_value_range,
+            psnr_value_range=psnr_value_range,
+            alpha_value_range=alpha_value_range,
+            depth_value_range=depth_value_range,
+            depth_range_mode=depth_range_mode,
+            render_mode=render_mode,
+            map_specs=map_specs,
+        )
+        inspection = self._render_inspection_from_state(
+            request=request,
+            state=state,
+            render_fn=render_fn,
+            render_step=render_step,
+            training_config=training_config,
+        )
+        self.cache_training_view_inspection(request, inspection, render_step)
+        return inspection
 
+    def _cached_inspection(
+        self,
+        sample: PreparedFrameSample,
+        *,
+        value_range: tuple[float, float] | None,
+        image_loss_value_range: tuple[float, float] | None,
+        ssim_value_range: tuple[float, float] | None,
+        psnr_value_range: tuple[float, float] | None,
+        alpha_value_range: tuple[float, float] | None,
+        depth_value_range: tuple[float, float] | None,
+        depth_range_mode: TrainingViewDepthRangeMode,
+        render_mode: TrainingViewRenderMode,
+        map_specs: Sequence[TrainingViewMapSpec],
+    ) -> TrainingViewInspection | None:
+        """Return a cached inspection when it matches the latest safe step."""
+        with self._lock:
+            render_step = self._render_step
+            latest_step = self._latest_step
+            status = self._status
+            current_cache_key = self._inspection_cache_key
+            cached = self._inspection_cache
+        if status == "running" and render_step != latest_step:
+            return None
         cache_key = _inspection_cache_key(
             sample,
             render_step=render_step,
@@ -1579,15 +1787,117 @@ class TrainingViewerHandle:
             render_mode=render_mode,
             map_specs=map_specs,
         )
-        with self._lock:
-            if (
-                self._inspection_cache_key == cache_key
-                and self._inspection_cache is not None
-            ):
-                return self._inspection_cache
+        if current_cache_key == cache_key and cached is not None:
+            return cached
+        return None
 
-        camera = sample.camera.to(state.device)
-        target = sample.image.to(state.device).to(torch.float32)
+    def _should_queue_inspection_request(self) -> bool:
+        """Return whether inspection must be fulfilled by the training thread."""
+        with self._lock:
+            thread = self._thread
+            return (
+                self._status == "running"
+                and self._state is not None
+                and self._render_fn is not None
+                and thread is not None
+                and thread.is_alive()
+                and thread is not threading.current_thread()
+            )
+
+    def queue_training_view_inspection(
+        self,
+        request: TrainingViewInspectionRequest,
+    ) -> None:
+        """Queue a fixed-view inspection render for the training thread."""
+        with self._lock:
+            previous_request = self._pending_inspection
+            self._pending_inspection = request
+        if previous_request is not None:
+            previous_request.supersede()
+
+    def _wait_for_training_view_inspection(
+        self,
+        request: TrainingViewInspectionRequest,
+    ) -> TrainingViewInspection:
+        """Wait for a training-thread inspection or return the best fallback."""
+        while not request.event.wait(timeout=0.1):
+            with self._lock:
+                status = self._status
+                thread = self._thread
+                cached = self._inspection_cache
+            if status != "running" or thread is None or not thread.is_alive():
+                return cached or _placeholder_inspection(request.sample)
+        if request.result is not None:
+            return request.result
+        if request.error is not None:
+            raise request.error
+        with self._lock:
+            cached = self._inspection_cache
+        return cached or _placeholder_inspection(request.sample)
+
+    def render_pending_inspection(self, state: TrainState) -> None:
+        """Fulfill the latest queued fixed-view inspection at a step boundary."""
+        with self._lock:
+            request = self._pending_inspection
+            self._pending_inspection = None
+            render_fn = self._render_fn
+            training_config = self._training_config
+        if request is None:
+            return
+        if render_fn is None:
+            request.fail(RuntimeError("Training viewer has no render function."))
+            return
+        try:
+            inspection = self._render_inspection_from_state(
+                request=request,
+                state=state,
+                render_fn=render_fn,
+                render_step=state.step,
+                training_config=training_config,
+            )
+        except Exception as error:
+            request.fail(error)
+            return
+        self.cache_training_view_inspection(request, inspection, state.step)
+        request.resolve(inspection)
+
+    def cache_training_view_inspection(
+        self,
+        request: TrainingViewInspectionRequest,
+        inspection: TrainingViewInspection,
+        render_step: int | None,
+    ) -> None:
+        """Cache a completed fixed-view inspection for notebook reruns."""
+        with self._lock:
+            self._render_step = render_step
+            self._inspection_cache_key = _inspection_cache_key(
+                request.sample,
+                render_step=render_step,
+                value_range=request.value_range,
+                image_loss_value_range=request.image_loss_value_range,
+                ssim_value_range=request.ssim_value_range,
+                psnr_value_range=request.psnr_value_range,
+                alpha_value_range=request.alpha_value_range,
+                depth_value_range=request.depth_value_range,
+                depth_range_mode=request.depth_range_mode,
+                render_mode=request.render_mode,
+                map_specs=request.map_specs,
+            )
+            self._inspection_cache = inspection
+            self._render_error_text = None
+
+    def _render_inspection_from_state(
+        self,
+        *,
+        request: TrainingViewInspectionRequest,
+        state: TrainState,
+        render_fn: Any,
+        render_step: int | None,
+        training_config: TrainingConfig | None,
+    ) -> TrainingViewInspection:
+        """Render a fixed-view inspection from a known-safe training state."""
+        camera = request.sample.camera.to(state.device)
+        target = request.sample.image.to(state.device).to(torch.float32)
         with torch.no_grad():
             render_output, prediction = _render_prediction(
                 render_fn,
@@ -1627,19 +1937,19 @@ class TrainingViewerHandle:
                 prediction,
             )
             resolved_render_mode = _select_render_mode(
-                render_mode, available_modes
+                request.render_mode, available_modes
             )
             preview = _training_view_preview(
                 resolved_render_mode,
                 prediction=prediction,
                 render_output=render_output,
-                alpha_value_range=alpha_value_range,
-                depth_value_range=depth_value_range,
-                depth_range_mode=depth_range_mode,
+                alpha_value_range=request.alpha_value_range,
+                depth_value_range=request.depth_value_range,
+                depth_range_mode=request.depth_range_mode,
             )
-            snapshot = self.snapshot()
+            snapshot = replace(self.snapshot(), render_step=render_step)
             context = TrainingViewMapContext(
-                sample=sample,
+                sample=request.sample,
                 target=target,
                 prediction=prediction,
                 l1_error=l1_error,
@@ -1661,7 +1971,7 @@ class TrainingViewerHandle:
                 l1_image=viridis_error_map(
                     l1_error,
                     quantile=1.0,
-                    value_range=value_range,
+                    value_range=request.value_range,
                 ),
                 l1_error=l1_error.detach().cpu(),
                 l1_max=l1_max,
@@ -1669,7 +1979,7 @@ class TrainingViewerHandle:
                 image_loss_image=viridis_error_map(
                     image_loss,
                     quantile=1.0,
-                    value_range=image_loss_value_range,
+                    value_range=request.image_loss_value_range,
                 ),
                 image_loss_error=image_loss.detach().cpu(),
                 image_loss_label=image_loss_label,
@@ -1678,7 +1988,7 @@ class TrainingViewerHandle:
                 ssim_image=viridis_error_map(
                     ssim_error,
                     quantile=1.0,
-                    value_range=ssim_value_range,
+                    value_range=request.ssim_value_range,
                 ),
                 ssim_error=ssim_error.detach().cpu(),
                 ssim_max=ssim_max,
@@ -1686,7 +1996,7 @@ class TrainingViewerHandle:
                 psnr_image=viridis_error_map(
                     psnr_values,
                     quantile=1.0,
-                    value_range=psnr_value_range,
+                    value_range=request.psnr_value_range,
                     invert=True,
                 ),
                 psnr=psnr_values.detach().cpu(),
@@ -1696,14 +2006,12 @@ class TrainingViewerHandle:
                 render_mode=resolved_render_mode,
                 available_render_modes=available_modes,
                 maps=tuple(
-                    _render_map_spec(spec, context) for spec in map_specs
+                    _render_map_spec(spec, context)
+                    for spec in request.map_specs
                 ),
                 render_step=render_step,
                 available=True,
             )
-        with self._lock:
-            self._inspection_cache_key = cache_key
-            self._inspection_cache = inspection
         return inspection
 
     def render_view_error_map(
@@ -1749,17 +2057,34 @@ class TrainingViewerHandle:
             available=True,
         )
 
-    def update_render_snapshot(self, state: TrainState) -> None:
+    def update_render_snapshot(self, state: TrainState) -> bool:
         """Publish a stable model snapshot for async viewer renders."""
-        with torch.no_grad():
-            render_state = replace(
-                state,
-                model=_clone_model_for_render(state.model),
-                diagnostics=dict(state.diagnostics),
-            )
+        try:
+            with torch.no_grad():
+                render_state = replace(
+                    state,
+                    model=_clone_model_for_render(state.model),
+                    diagnostics=dict(state.diagnostics),
+                )
+        except torch.OutOfMemoryError as error:
+            _empty_cuda_cache_after_oom()
+            with self._lock:
+                self._render_error_text = _render_snapshot_error_text(error)
+            return False
         with self._lock:
             self._render_state = render_state
             self._render_step = state.step
+            self._render_error_text = None
+            self._inspection_cache_key = None
+            self._inspection_cache = None
+        return True
+
+    def publish_live_render_state(self, state: TrainState) -> None:
+        """Publish a non-cloned render state when training is no longer mutating."""
+        with self._lock:
+            self._render_state = state
+            self._render_step = state.step
+            self._render_error_text = None
             self._inspection_cache_key = None
             self._inspection_cache = None
 
@@ -1895,7 +2220,7 @@ class TrainingViewerHandle:
 
     def maybe_rerender_after_step(self, state: TrainState) -> None:
         """Request a render when the normal or boosted cadence is due."""
-        if not self.config.enabled:
+        if not self.config.enabled or self.viewer is None:
             return
         now = time.monotonic()
         with self._lock:
@@ -1923,7 +2248,8 @@ class TrainingViewerHandle:
                 return
             self._last_render_step = state.step
             self._last_render_at = now
-        self.update_render_snapshot(state)
+        if not self.update_render_snapshot(state):
+            return
         if self.viewer is None:
             return
         if self.config.viewer_backend == "viser":
@@ -1959,6 +2285,7 @@ class TrainingViewerHook:
     ) -> None:
         """Update notebook progress after a completed training step."""
         self.handle.update_progress(state, metrics)
+        self.handle.render_pending_inspection(state)
         self.handle.maybe_rerender_after_step(state)
 
 
@@ -2062,6 +2389,267 @@ def create_training_viewer(
     return handle
 
 
+def training_view_default_starred_views_path(
+    start_path: str | PathLike[str] | None = None,
+) -> Path:
+    """Return the repo-local default path for persisted inspector stars."""
+    current_path = Path.cwd() if start_path is None else Path(start_path)
+    current_path = current_path.expanduser().resolve()
+    if current_path.is_file():
+        current_path = current_path.parent
+    for candidate in (current_path, *current_path.parents):
+        if (candidate / ".git").exists() or (
+            candidate / "pyproject.toml"
+        ).exists():
+            return candidate / ".ember" / "training_view_stars.json"
+    return current_path / ".ember" / "training_view_stars.json"
+
+
+def training_view_starred_views_path(
+    path: str | PathLike[str] | None,
+) -> Path:
+    """Resolve an explicit or default starred-view storage path."""
+    if path is None:
+        return training_view_default_starred_views_path()
+    return Path(path).expanduser()
+
+
+def training_view_scene_star_key(frame_view_catalog: Any) -> str:
+    """Return a stable dataset-dependent key for inspector stars."""
+    scene_record = getattr(frame_view_catalog, "scene_record", None)
+    dataset_config = getattr(frame_view_catalog, "config", None)
+    source_uris = tuple(
+        str(uri) for uri in getattr(scene_record, "source_uris", ()) or ()
+    )
+    root_path = getattr(scene_record, "root_path", None)
+    if root_path is not None:
+        source_uris = (*source_uris, str(Path(root_path).expanduser()))
+    payload = {
+        "camera_sensor_id": str(
+            getattr(dataset_config, "camera_sensor_id", "") or ""
+        ),
+        "default_camera_sensor_id": str(
+            getattr(scene_record, "default_camera_sensor_id", "") or ""
+        ),
+        "num_frames": int(getattr(scene_record, "num_frames", 0) or 0),
+        "source_format": str(getattr(scene_record, "source_format", "") or ""),
+        "source_uris": source_uris,
+    }
+    return json.dumps(payload, separators=(",", ":"), sort_keys=True)
+
+
+def training_view_empty_starred_views() -> dict[str, Any]:
+    """Return an empty starred-view payload."""
+    return {"version": 1, "scenes": {}}
+
+
+def training_view_normalize_starred_views(
+    payload: dict[str, Any],
+) -> dict[str, Any]:
+    """Return a validated and deterministically sorted starred-view payload."""
+    if not isinstance(payload, dict):
+        raise TypeError("Starred-view payload must be a JSON object.")
+    scenes = payload.get("scenes", {})
+    if not isinstance(scenes, dict):
+        raise TypeError("Starred-view payload 'scenes' must be an object.")
+    normalized_scenes = {}
+    for scene_key, raw_entries in scenes.items():
+        if not isinstance(raw_entries, list):
+            continue
+        entries = []
+        seen_ids = set()
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            split = raw_entry.get("split")
+            source_index = raw_entry.get("source_index")
+            frame_id = raw_entry.get("frame_id")
+            if split not in {"train", "val"} or not isinstance(frame_id, str):
+                continue
+            try:
+                source_index = int(source_index)
+            except (TypeError, ValueError):
+                continue
+            entry = {
+                "frame_id": frame_id,
+                "source_index": source_index,
+                "split": split,
+            }
+            entry_id = training_view_star_entry_id(entry)
+            if entry_id in seen_ids:
+                continue
+            seen_ids.add(entry_id)
+            entries.append(entry)
+        if entries:
+            normalized_scenes[str(scene_key)] = sorted(
+                entries,
+                key=lambda entry: (
+                    str(entry["split"]),
+                    int(entry["source_index"]),
+                    str(entry["frame_id"]),
+                ),
+            )
+    return {"version": 1, "scenes": normalized_scenes}
+
+
+def training_view_read_starred_views(
+    path: str | PathLike[str] | None = None,
+) -> dict[str, Any]:
+    """Read persisted starred view selections."""
+    resolved_path = training_view_starred_views_path(path)
+    if not resolved_path.exists():
+        return training_view_empty_starred_views()
+    return training_view_normalize_starred_views(
+        json.loads(resolved_path.read_text())
+    )
+
+
+def training_view_write_starred_views(
+    payload: dict[str, Any],
+    path: str | PathLike[str] | None = None,
+) -> None:
+    """Persist starred view selections as stable JSON."""
+    resolved_path = training_view_starred_views_path(path)
+    normalized = training_view_normalize_starred_views(payload)
+    resolved_path.parent.mkdir(parents=True, exist_ok=True)
+    resolved_path.write_text(
+        json.dumps(normalized, indent=2, sort_keys=True) + "\n"
+    )
+
+
+def training_view_star_entry_id(entry: Mapping[str, Any]) -> str:
+    """Return the stable identity string for a persisted starred-view entry."""
+    return f"{entry['split']}:{int(entry['source_index'])}:{entry['frame_id']!s}"
+
+
+def training_view_star_id(view_ref: Any) -> str:
+    """Return the stable identity string for a prepared frame view."""
+    return (
+        f"{view_ref.split}:{int(view_ref.source_index)}:"
+        f"{view_ref.frame_id!s}"
+    )
+
+
+def training_view_star_entry(view_ref: Any) -> dict[str, Any]:
+    """Return the persisted JSON entry for a prepared frame view."""
+    return {
+        "frame_id": str(view_ref.frame_id),
+        "source_index": int(view_ref.source_index),
+        "split": view_ref.split,
+    }
+
+
+def training_view_starred_view_ids(
+    payload: dict[str, Any],
+    scene_key: str,
+    split: str | None = None,
+) -> set[str]:
+    """Return starred view identity strings for one scene."""
+    normalized = training_view_normalize_starred_views(payload)
+    entries = normalized["scenes"].get(scene_key, [])
+    return {
+        training_view_star_entry_id(entry)
+        for entry in entries
+        if split is None or entry["split"] == split
+    }
+
+
+def training_view_is_starred(
+    payload: dict[str, Any],
+    scene_key: str | None,
+    view_ref: Any | None,
+) -> bool:
+    """Return whether a prepared view is starred."""
+    if scene_key is None or view_ref is None:
+        return False
+    return training_view_star_id(view_ref) in training_view_starred_view_ids(
+        payload,
+        scene_key,
+        view_ref.split,
+    )
+
+
+def training_view_starred_views_with_toggled_view(
+    payload: dict[str, Any],
+    scene_key: str,
+    view_ref: Any,
+) -> dict[str, Any]:
+    """Return a starred-view payload with one view toggled."""
+    normalized = training_view_normalize_starred_views(payload)
+    scenes = dict(normalized["scenes"])
+    entries = list(scenes.get(scene_key, []))
+    view_id = training_view_star_id(view_ref)
+    retained_entries = [
+        entry
+        for entry in entries
+        if training_view_star_entry_id(entry) != view_id
+    ]
+    if len(retained_entries) == len(entries):
+        retained_entries.append(training_view_star_entry(view_ref))
+    if retained_entries:
+        scenes[scene_key] = retained_entries
+    else:
+        scenes.pop(scene_key, None)
+    return training_view_normalize_starred_views(
+        {"version": 1, "scenes": scenes}
+    )
+
+
+def training_view_button_count(value: Any) -> int:
+    """Return a monotonically increasing button click count."""
+    try:
+        return int(value or 0) + 1
+    except (TypeError, ValueError):
+        return 1
+
+
+def training_view_set_active_key(
+    key: str | None,
+    set_selected_view_key: Callable[[str | None], None],
+    set_active_view_key: Callable[[str | None], None],
+) -> None:
+    """Set both the split-local and active inspector view keys."""
+    if key is None:
+        return
+    set_selected_view_key(key)
+    set_active_view_key(key)
+
+
+def training_view_select_button_click(
+    value: Any,
+    key: str | None,
+    set_selected_view_key: Callable[[str | None], None],
+    set_active_view_key: Callable[[str | None], None],
+) -> int:
+    """Handle a previous/next view button click."""
+    training_view_set_active_key(
+        key,
+        set_selected_view_key,
+        set_active_view_key,
+    )
+    return training_view_button_count(value)
+
+
+def training_view_toggle_star_button_click(
+    value: Any,
+    view_ref: Any | None,
+    scene_key: str | None,
+    starred_payload: dict[str, Any],
+    set_starred_view_state: Callable[[dict[str, Any]], None],
+    storage_path: str | PathLike[str] | None,
+) -> int:
+    """Handle a star/unstar button click and persist the updated payload."""
+    if view_ref is not None and scene_key is not None:
+        next_payload = training_view_starred_views_with_toggled_view(
+            starred_payload,
+            scene_key,
+            view_ref,
+        )
+        training_view_write_starred_views(next_payload, storage_path)
+        set_starred_view_state(next_payload)
+    return training_view_button_count(value)
+
+
 def create_training_view_inspector(
     frame_view_catalog: Any,
     *,
@@ -2070,33 +2658,214 @@ def create_training_view_inspector(
 ) -> TrainingViewInspector:
     """Create reusable train/validation fixed-view notebook controls."""
     inspector_config = config or TrainingViewInspectorConfig()
-    validation_view_options = _view_key_options(frame_view_catalog, "val")
-    training_view_options = _view_key_options(frame_view_catalog, "train")
+    selected_validation_view_key, set_selected_validation_view_key = mo.state(
+        None,
+        allow_self_loops=True,
+    )
+    selected_training_view_key, set_selected_training_view_key = mo.state(
+        None,
+        allow_self_loops=True,
+    )
+    active_view_key, set_active_view_key = mo.state(
+        None,
+        allow_self_loops=True,
+    )
+    starred_views_storage_path = training_view_starred_views_path(
+        inspector_config.starred_views_path
+    )
+    initial_starred_views = (
+        training_view_read_starred_views(starred_views_storage_path)
+        if inspector_config.enable_starred_views
+        else training_view_empty_starred_views()
+    )
+    starred_view_state, set_starred_view_state = mo.state(
+        initial_starred_views,
+        allow_self_loops=True,
+    )
+    scene_star_key = (
+        training_view_scene_star_key(frame_view_catalog)
+        if inspector_config.enable_starred_views
+        else None
+    )
+    starred_payload = (
+        starred_view_state()
+        if inspector_config.enable_starred_views
+        else training_view_empty_starred_views()
+    )
+    starred_view_ids = (
+        training_view_starred_view_ids(starred_payload, scene_star_key)
+        if scene_star_key is not None
+        else set()
+    )
+    validation_key = _resolve_view_key(
+        frame_view_catalog,
+        "val",
+        selected_validation_view_key(),
+        starred_view_ids,
+    )
+    training_key = _resolve_view_key(
+        frame_view_catalog,
+        "train",
+        selected_training_view_key(),
+        starred_view_ids,
+    )
+    validation_view_options = _view_key_options(
+        frame_view_catalog,
+        "val",
+        starred_view_ids,
+    )
+    training_view_options = _view_key_options(
+        frame_view_catalog,
+        "train",
+        starred_view_ids,
+    )
+    validation_previous_key = _neighbor_view_key(
+        frame_view_catalog,
+        "val",
+        validation_key,
+        -1,
+        starred_view_ids,
+    )
+    validation_next_key = _neighbor_view_key(
+        frame_view_catalog,
+        "val",
+        validation_key,
+        1,
+        starred_view_ids,
+    )
+    training_previous_key = _neighbor_view_key(
+        frame_view_catalog,
+        "train",
+        training_key,
+        -1,
+        starred_view_ids,
+    )
+    training_next_key = _neighbor_view_key(
+        frame_view_catalog,
+        "train",
+        training_key,
+        1,
+        starred_view_ids,
+    )
+    validation_view_ref = _view_ref_from_key(frame_view_catalog, validation_key)
+    training_view_ref = _view_ref_from_key(frame_view_catalog, training_key)
     validation_view_selector = mo.ui.dropdown(
         validation_view_options,
-        value=_first_option_label(validation_view_options),
+        value=_option_label_for_key(validation_view_options, validation_key),
         label="Validation view",
         searchable=True,
         full_width=True,
+        on_change=lambda key: training_view_set_active_key(
+            key,
+            set_selected_validation_view_key,
+            set_active_view_key,
+        ),
     )
-    show_validation_view_button = mo.ui.button(
-        on_click=lambda value: int(value or 0) + 1,
+    validation_previous_button = mo.ui.button(
+        on_click=lambda value: training_view_select_button_click(
+            value,
+            validation_previous_key,
+            set_selected_validation_view_key,
+            set_active_view_key,
+        ),
         value=0,
-        label="Show",
-        full_width=True,
+        label="Back",
+        disabled=validation_previous_key is None,
+    )
+    validation_next_button = mo.ui.button(
+        on_click=lambda value: training_view_select_button_click(
+            value,
+            validation_next_key,
+            set_selected_validation_view_key,
+            set_active_view_key,
+        ),
+        value=0,
+        label="Next",
+        disabled=validation_next_key is None,
+    )
+    validation_star_button = mo.ui.button(
+        on_click=lambda value: training_view_toggle_star_button_click(
+            value,
+            validation_view_ref,
+            scene_star_key,
+            starred_payload,
+            set_starred_view_state,
+            starred_views_storage_path,
+        ),
+        value=0,
+        label=(
+            "Unstar"
+            if training_view_is_starred(
+                starred_payload,
+                scene_star_key,
+                validation_view_ref,
+            )
+            else "Star"
+        ),
+        disabled=(
+            not inspector_config.enable_starred_views
+            or scene_star_key is None
+            or validation_view_ref is None
+        ),
     )
     training_view_selector = mo.ui.dropdown(
         training_view_options,
-        value=_first_option_label(training_view_options),
+        value=_option_label_for_key(training_view_options, training_key),
         label="Training view",
         searchable=True,
         full_width=True,
+        on_change=lambda key: training_view_set_active_key(
+            key,
+            set_selected_training_view_key,
+            set_active_view_key,
+        ),
     )
-    show_training_view_button = mo.ui.button(
-        on_click=lambda value: int(value or 0) + 1,
+    training_previous_button = mo.ui.button(
+        on_click=lambda value: training_view_select_button_click(
+            value,
+            training_previous_key,
+            set_selected_training_view_key,
+            set_active_view_key,
+        ),
         value=0,
-        label="Show",
-        full_width=True,
+        label="Back",
+        disabled=training_previous_key is None,
+    )
+    training_next_button = mo.ui.button(
+        on_click=lambda value: training_view_select_button_click(
+            value,
+            training_next_key,
+            set_selected_training_view_key,
+            set_active_view_key,
+        ),
+        value=0,
+        label="Next",
+        disabled=training_next_key is None,
+    )
+    training_star_button = mo.ui.button(
+        on_click=lambda value: training_view_toggle_star_button_click(
+            value,
+            training_view_ref,
+            scene_star_key,
+            starred_payload,
+            set_starred_view_state,
+            starred_views_storage_path,
+        ),
+        value=0,
+        label=(
+            "Unstar"
+            if training_view_is_starred(
+                starred_payload,
+                scene_star_key,
+                training_view_ref,
+            )
+            else "Star"
+        ),
+        disabled=(
+            not inspector_config.enable_starred_views
+            or scene_star_key is None
+            or training_view_ref is None
+        ),
     )
     render_mode_options = training_view_render_mode_options(training_config)
     render_mode_selector = mo.ui.dropdown(
@@ -2205,14 +2974,24 @@ def create_training_view_inspector(
     )
     controls = [
         mo.hstack(
-            [validation_view_selector, show_validation_view_button],
-            widths=[4.0, 1.0],
+            [
+                validation_previous_button,
+                validation_view_selector,
+                validation_next_button,
+                validation_star_button,
+            ],
+            widths=[0.8, 4.0, 0.8, 1.0],
             align="end",
             gap=0.75,
         ),
         mo.hstack(
-            [training_view_selector, show_training_view_button],
-            widths=[4.0, 1.0],
+            [
+                training_previous_button,
+                training_view_selector,
+                training_next_button,
+                training_star_button,
+            ],
+            widths=[0.8, 4.0, 0.8, 1.0],
             align="end",
             gap=0.75,
         ),
@@ -2242,9 +3021,9 @@ def create_training_view_inspector(
         controls=TrainingViewInspectorControls(
             view=controls_view,
             validation_view_selector=validation_view_selector,
-            show_validation_view_button=show_validation_view_button,
+            show_validation_view_button=None,
             training_view_selector=training_view_selector,
-            show_training_view_button=show_training_view_button,
+            show_training_view_button=None,
             render_mode_selector=render_mode_selector,
             l1_range_slider=l1_range_slider,
             image_loss_range_slider=image_loss_range_slider,
@@ -2252,12 +3031,22 @@ def create_training_view_inspector(
             psnr_range_slider=psnr_range_slider,
             alpha_range_slider=alpha_range_slider,
             depth_range_slider=depth_range_slider,
+            validation_previous_button=validation_previous_button,
+            validation_next_button=validation_next_button,
+            validation_star_button=validation_star_button,
+            training_previous_button=training_previous_button,
+            training_next_button=training_next_button,
+            training_star_button=training_star_button,
         ),
         elements={
             _INSPECTOR_VALIDATION_VIEW_KEY: validation_view_selector,
-            _INSPECTOR_SHOW_VALIDATION_KEY: show_validation_view_button,
+            _INSPECTOR_PREVIOUS_VALIDATION_KEY: validation_previous_button,
+            _INSPECTOR_NEXT_VALIDATION_KEY: validation_next_button,
+            _INSPECTOR_STAR_VALIDATION_KEY: validation_star_button,
             _INSPECTOR_TRAINING_VIEW_KEY: training_view_selector,
-            _INSPECTOR_SHOW_TRAINING_KEY: show_training_view_button,
+            _INSPECTOR_PREVIOUS_TRAINING_KEY: training_previous_button,
+            _INSPECTOR_NEXT_TRAINING_KEY: training_next_button,
+            _INSPECTOR_STAR_TRAINING_KEY: training_star_button,
             _INSPECTOR_RENDER_MODE_KEY: render_mode_selector,
             _INSPECTOR_L1_RANGE_KEY: l1_range_slider,
             _INSPECTOR_IMAGE_LOSS_RANGE_KEY: image_loss_range_slider,
@@ -2266,6 +3055,7 @@ def create_training_view_inspector(
             _INSPECTOR_ALPHA_RANGE_KEY: alpha_range_slider,
             _INSPECTOR_DEPTH_RANGE_KEY: depth_range_slider,
         },
+        active_view_key=active_view_key,
     )
 
 
@@ -3229,23 +4019,132 @@ def _inspection_cache_key(
     )
 
 
-def _view_key_options(frame_view_catalog: Any, split: str) -> dict[str, str]:
+def _ordered_view_refs(
+    frame_view_catalog: Any,
+    split: str,
+    starred_view_ids: set[str] | None = None,
+) -> tuple[Any, ...]:
+    """Return view refs with starred views first and source order preserved."""
     if frame_view_catalog is None:
+        return ()
+    starred = starred_view_ids or set()
+    views = tuple(frame_view_catalog.views(split))
+    return tuple(
+        view_ref
+        for _, view_ref in sorted(
+            enumerate(views),
+            key=lambda indexed_view: (
+                0
+                if training_view_star_id(indexed_view[1]) in starred
+                else 1,
+                indexed_view[0],
+            ),
+        )
+    )
+
+
+def _view_label(
+    view_ref: Any,
+    starred_view_ids: set[str] | None = None,
+) -> str:
+    """Return the dropdown label for a prepared-frame view."""
+    starred = starred_view_ids or set()
+    prefix = "* " if training_view_star_id(view_ref) in starred else ""
+    return f"{prefix}{view_ref.label}"
+
+
+def _view_key_options(
+    frame_view_catalog: Any,
+    split: str,
+    starred_view_ids: set[str] | None = None,
+) -> dict[str, str]:
+    """Return dropdown labels mapped to stable view keys."""
+    views = _ordered_view_refs(frame_view_catalog, split, starred_view_ids)
+    if len(views) == 0:
         return {f"No {split} views": ""}
-    options = frame_view_catalog.view_key_options(split)
-    if not options:
-        return {f"No {split} views": ""}
-    return options
+    return {
+        _view_label(view_ref, starred_view_ids): view_ref.key
+        for view_ref in views
+    }
 
 
 def _first_option_label(options: dict[str, str]) -> str:
     return next(iter(options), "")
 
 
+def _option_label_for_key(options: dict[str, str], key: str | None) -> str:
+    """Return a dropdown label for a stored view key."""
+    for label, option_key in options.items():
+        if option_key == key:
+            return label
+    return _first_option_label(options)
+
+
 def _view_ref_from_key(frame_view_catalog: Any, key: str | None) -> Any | None:
     if frame_view_catalog is None:
         return None
     return frame_view_catalog.view_ref_by_key(key)
+
+
+def _view_key_sequence(
+    frame_view_catalog: Any,
+    split: str,
+    starred_view_ids: set[str] | None = None,
+) -> tuple[str, ...]:
+    """Return ordered selectable view keys for one split."""
+    return tuple(
+        view_ref.key
+        for view_ref in _ordered_view_refs(
+            frame_view_catalog,
+            split,
+            starred_view_ids,
+        )
+    )
+
+
+def _resolve_view_key(
+    frame_view_catalog: Any,
+    split: str,
+    key: str | None,
+    starred_view_ids: set[str] | None = None,
+) -> str | None:
+    """Return a valid selected view key for one split."""
+    keys = _view_key_sequence(frame_view_catalog, split, starred_view_ids)
+    if len(keys) == 0:
+        return None
+    if key in keys:
+        return key
+    return keys[0]
+
+
+def _neighbor_view_key(
+    frame_view_catalog: Any,
+    split: str,
+    current_key: str | None,
+    direction: int,
+    starred_view_ids: set[str] | None = None,
+) -> str | None:
+    """Return the previous or next view key, wrapping within a split."""
+    keys = _view_key_sequence(frame_view_catalog, split, starred_view_ids)
+    if len(keys) == 0:
+        return None
+    if current_key not in keys:
+        return keys[0]
+    current_index = keys.index(current_key)
+    return keys[(current_index + int(direction)) % len(keys)]
+
+
+def _resolve_active_view_key(
+    frame_view_catalog: Any,
+    active_key: str | None,
+    validation_key: str | None,
+    training_key: str | None,
+) -> str | None:
+    """Return a valid active view key with validation-first fallback."""
+    for key in (active_key, validation_key, training_key):
+        if _view_ref_from_key(frame_view_catalog, key) is not None:
+            return key
+    return None
 
 
 def _map_caption(result: TrainingViewMapResult) -> str:
@@ -3283,6 +4182,24 @@ def _primitive_count(state: TrainState) -> int | None:
     if isinstance(center_position, Tensor) and center_position.ndim > 0:
         return int(center_position.shape[0])
     return None
+
+
+def _empty_cuda_cache_after_oom() -> None:
+    """Release unused CUDA cache blocks after a best-effort preview OOM."""
+    if not torch.cuda.is_available():
+        return
+    try:
+        torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
+def _render_snapshot_error_text(error: torch.OutOfMemoryError) -> str:
+    """Return a compact user-facing render snapshot failure summary."""
+    first_line = str(error).splitlines()[0].strip()
+    if len(first_line) > 240:
+        first_line = first_line[:237].rstrip() + "..."
+    return f"{type(error).__name__}: {first_line}"
 
 
 def _clone_model_for_render(model: Any) -> Any:
@@ -3495,8 +4412,21 @@ __all__ = [
     "training_inspector_spinner",
     "training_preparation_outputs",
     "training_status_snapshot_from_result",
+    "training_view_default_starred_views_path",
+    "training_view_empty_starred_views",
     "training_view_image_loss_terms",
+    "training_view_is_starred",
+    "training_view_normalize_starred_views",
+    "training_view_read_starred_views",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",
+    "training_view_scene_star_key",
+    "training_view_star_entry",
+    "training_view_star_entry_id",
+    "training_view_star_id",
+    "training_view_starred_view_ids",
+    "training_view_starred_views_path",
+    "training_view_starred_views_with_toggled_view",
+    "training_view_write_starred_views",
     "viridis_error_map",
 ]

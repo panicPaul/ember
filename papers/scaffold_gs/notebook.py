@@ -66,6 +66,9 @@ class ScaffoldGSDataConfig(ScaffoldGSConfigBase):
 
     camera_sensor_id: str | None = None
     image_scale_factor: float = Field(default=1.0, gt=0.0)
+    cache_resized_images: bool = True
+    resized_image_cache_root: Path | None = None
+    max_resized_image_caches: int = Field(default=4, ge=1)
     split_target: Literal["train", "val", "all"] = "train"
     split_every_n: int | None = Field(default=8, ge=1)
     materialization_stage: Literal["none", "decoded", "prepared"] = "none"
@@ -623,17 +626,27 @@ def _(
     frame_view_catalog,
     training_inspector,
     training_inspector_refresh,
+    training_result,
     training_viewer_handle,
 ):
-    training_viewer = (
-        None
-        if training_inspector is None
-        else training_inspector.panel(
+    preview_status_panel = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            training_result=training_result,
+        )
+    )
+    if training_inspector is None:
+        training_viewer = preview_status_panel
+    else:
+        fixed_view_panel = training_inspector.panel(
             training_viewer_handle,
             frame_view_catalog,
             refresh=training_inspector_refresh,
         )
-    )
+        training_viewer = mo.vstack(
+            [preview_status_panel, fixed_view_panel],
+            gap=0.75,
+        ).style(max_height="none", overflow="visible")
     return (training_viewer,)
 
 
@@ -1096,6 +1109,11 @@ def build_prepared_frame_dataset_config(
             resize_width_scale=config.data.image_scale_factor,
             resize_width_target=None,
             interpolation=config.data.interpolation,
+            resized_image_cache=ember.ResizedImageCacheConfig(
+                enabled=config.data.cache_resized_images,
+                cache_root=config.data.resized_image_cache_root,
+                max_caches=config.data.max_resized_image_caches,
+            ),
         ),
     )
 

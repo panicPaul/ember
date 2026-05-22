@@ -39,6 +39,9 @@ from ember_core.data.preprocess import (
     resize_intrinsics,
     resolve_resize_shape,
 )
+from ember_core.data.resized_cache import (
+    resolve_resized_image_cache_for_dataset,
+)
 
 
 @dataclass(frozen=True)
@@ -324,6 +327,10 @@ class PreparedFrameDataset(Dataset[PreparedFrameSample]):
         materialization_num_workers: int | None = 8,
         sample_cache: PreparedFrameCache | None = None,
     ) -> None:
+        scene_record, config = resolve_resized_image_cache_for_dataset(
+            scene_record=scene_record,
+            config=config,
+        )
         self.scene_record = scene_record
         self.config = config
         resolved_camera_sensor_id = camera_sensor_id

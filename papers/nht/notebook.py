@@ -8,7 +8,6 @@ app = marimo.App(width="medium")
 with app.setup:
     import json
     import math
-    import shutil
     import sys
     from pathlib import Path
     from typing import Any, Literal
@@ -1281,163 +1280,6 @@ def resolved_nht_scene_path(config: NHTExperimentConfig) -> Path:
 
 
 @app.function
-def nht_resized_cache_enabled(config: NHTExperimentConfig) -> bool:
-    """Return whether NHT should use a derived resized image cache."""
-    return (
-        config.data.cache_resized_images
-        and config.data.image_scale_factor != 1.0
-    )
-
-
-@app.function
-def nht_source_image_root(config: NHTExperimentConfig) -> Path:
-    """Return the full-resolution source image root."""
-    if config.scene.image_root is not None:
-        return config.scene.image_root.expanduser()
-    return resolved_nht_scene_path(config) / "images"
-
-
-@app.function
-def nht_resized_cache_parent(config: NHTExperimentConfig) -> Path:
-    """Return the reusable derived image cache parent for the scene."""
-    if config.data.resized_image_cache_root is not None:
-        return config.data.resized_image_cache_root.expanduser()
-    return resolved_nht_scene_path(config) / "ember_cache" / "resized_images"
-
-
-@app.function
-def nht_resized_cache_root(config: NHTExperimentConfig) -> Path:
-    """Return the derived resized image cache root for this config."""
-    scale_name = f"{config.data.image_scale_factor:.6f}".rstrip("0").rstrip(".")
-    scale_name = scale_name.replace(".", "p")
-    return nht_resized_cache_parent(config) / (
-        f"scale_{scale_name}_{config.data.interpolation}"
-    )
-
-
-@app.function
-def nht_pillow_resampling(interpolation: str) -> Any:
-    """Translate notebook interpolation names to Pillow resampling filters."""
-    from PIL import Image
-
-    if interpolation == "nearest":
-        return Image.Resampling.NEAREST
-    if interpolation == "bilinear":
-        return Image.Resampling.BILINEAR
-    if interpolation == "bicubic":
-        return Image.Resampling.BICUBIC
-    raise ValueError(f"Unsupported interpolation mode {interpolation!r}.")
-
-
-@app.function
-def enforce_nht_resized_cache_limit(
-    *,
-    cache_root: Path,
-    max_caches: int,
-) -> None:
-    """Keep only a bounded number of reusable resized image caches."""
-    parent = cache_root.parent
-    if not parent.exists():
-        return
-    cache_dirs = [
-        path
-        for path in parent.iterdir()
-        if path.is_dir() and path.name.startswith("scale_")
-    ]
-    overflow = len(cache_dirs) - max_caches
-    if overflow <= 0:
-        return
-    evictable = sorted(
-        (path for path in cache_dirs if path != cache_root),
-        key=lambda path: path.stat().st_mtime,
-    )
-    for stale_cache in evictable[:overflow]:
-        shutil.rmtree(stale_cache)
-
-
-@app.function
-def materialize_nht_resized_image_cache(
-    *,
-    source_root: Path,
-    cache_root: Path,
-    scale: float,
-    interpolation: str,
-    max_caches: int,
-) -> Path:
-    """Create/update a derived resized image cache from full-res images."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from PIL import Image
-    from tqdm.auto import tqdm
-
-    image_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    source_paths = sorted(
-        path
-        for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in image_suffixes
-    )
-    if not source_paths:
-        raise ValueError(f"No source images found under {source_root}.")
-    resampling = nht_pillow_resampling(interpolation)
-    enforce_nht_resized_cache_limit(
-        cache_root=cache_root,
-        max_caches=max_caches,
-    )
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    def resize_one(source_path: Path) -> None:
-        relative_path = source_path.relative_to(source_root)
-        target_path = cache_root / relative_path
-        if (
-            target_path.exists()
-            and target_path.stat().st_mtime >= source_path.stat().st_mtime
-        ):
-            return
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(source_path) as image:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-            resized_size = (
-                max(1, round(width * scale)),
-                max(1, round(height * scale)),
-            )
-            resized = rgb.resize(resized_size, resampling)
-            save_kwargs = (
-                {"quality": 95}
-                if target_path.suffix.lower() in {".jpg", ".jpeg"}
-                else {}
-            )
-            resized.save(target_path, **save_kwargs)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(resize_one, path) for path in source_paths]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc="Preparing resized image cache",
-        ):
-            future.result()
-    (cache_root / "cache_metadata.json").write_text(
-        json.dumps(
-            {
-                "source_root": str(source_root),
-                "scale": scale,
-                "interpolation": interpolation,
-                "num_images": len(source_paths),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    cache_root.touch()
-    enforce_nht_resized_cache_limit(
-        cache_root=cache_root,
-        max_caches=max_caches,
-    )
-    return cache_root
-
-
-@app.function
 def nht_scene_load_config(
     config: NHTExperimentConfig,
 ) -> ember.ColmapSceneConfig:
@@ -1447,19 +1289,9 @@ def nht_scene_load_config(
     )
     scene_path = resolved_nht_scene_path(config)
     image_root = (
-        materialize_nht_resized_image_cache(
-            source_root=nht_source_image_root(config),
-            cache_root=nht_resized_cache_root(config),
-            scale=config.data.image_scale_factor,
-            interpolation=config.data.interpolation,
-            max_caches=config.data.max_resized_image_caches,
-        )
-        if nht_resized_cache_enabled(config)
-        else (
-            config.scene.image_root.expanduser()
-            if config.scene.image_root is not None
-            else None
-        )
+        config.scene.image_root.expanduser()
+        if config.scene.image_root is not None
+        else None
     )
     return ember.ColmapSceneConfig(
         path=scene_path,
@@ -1499,13 +1331,14 @@ def nht_prepared_frame_dataset_config(
             num_workers=config.data.materialization_num_workers,
         ),
         image_preparation=ember.ImagePreparationConfig(
-            resize_width_scale=(
-                None
-                if nht_resized_cache_enabled(config)
-                else config.data.image_scale_factor
-            ),
+            resize_width_scale=config.data.image_scale_factor,
             normalize=config.data.normalize_images,
             interpolation=config.data.interpolation,
+            resized_image_cache=ember.ResizedImageCacheConfig(
+                enabled=config.data.cache_resized_images,
+                cache_root=config.data.resized_image_cache_root,
+                max_caches=config.data.max_resized_image_caches,
+            ),
         ),
     )
 
@@ -1675,20 +1508,47 @@ def _(frame_view_catalog, is_script_mode):
 
 @app.cell
 def _(
+    current_config,
     frame_view_catalog,
+    is_script_mode,
     training_inspector,
     training_inspector_refresh,
+    training_result,
     training_viewer_handle,
 ):
-    training_viewer = (
-        None
-        if training_inspector is None
-        else training_inspector.panel(
+    training_snapshot = ember_splatting.snapshot_training_viewer(
+        training_viewer_handle
+    )
+    running_notice_text = None
+    if training_snapshot is not None and nht_should_show_jit_compile_notice(
+        current_config,
+        training_snapshot,
+        is_script_mode=is_script_mode,
+    ):
+        running_notice_text = (
+            "NHT shader JIT compilation is likely running. The first "
+            "training step can take a while; progress and metrics will "
+            "appear after compilation finishes."
+        )
+    preview_status_panel = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            training_result=training_result,
+            running_notice_text=running_notice_text,
+        )
+    )
+    if training_inspector is None:
+        training_viewer = preview_status_panel
+    else:
+        fixed_view_panel = training_inspector.panel(
             training_viewer_handle,
             frame_view_catalog,
             refresh=training_inspector_refresh,
         )
-    )
+        training_viewer = mo.vstack(
+            [preview_status_panel, fixed_view_panel],
+            gap=0.75,
+        ).style(max_height="none", overflow="visible")
     return (training_viewer,)
 
 

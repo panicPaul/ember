@@ -154,3 +154,12 @@ def test_training_status_and_preview_cells_use_shared_refresh_boundaries() -> (
         assert "training_status_refresh" not in viewer_args + viewer_body, (
             notebook_path
         )
+        assert "training_result" in viewer_args + viewer_body, notebook_path
+        assert "render_training_status_panel_from_handle" in viewer_body, (
+            notebook_path
+        )
+        assert "preview_status_panel" in viewer_body, notebook_path
+        assert "fixed_view_panel = training_inspector.panel" in viewer_body, (
+            notebook_path
+        )
+        assert "mo.vstack" in viewer_body, notebook_path

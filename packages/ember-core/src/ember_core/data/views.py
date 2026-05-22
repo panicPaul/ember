@@ -13,6 +13,9 @@ from ember_core.data.config_contracts import (
     SplitConfig,
 )
 from ember_core.data.contracts import PreparedFrameSample, SceneRecord
+from ember_core.data.resized_cache import (
+    resolve_resized_image_cache_for_dataset,
+)
 
 PreparedFrameViewSplit = Literal["train", "val"]
 
@@ -44,11 +47,13 @@ class PreparedFrameViewCatalog:
         training_split: PreparedFrameViewSplit = "train",
     ) -> None:
         """Create train and validation views over a shared prepared cache."""
-        self.scene_record = scene_record
-        self.config = config or PreparedFrameDatasetConfig()
+        self.scene_record, self.config = resolve_resized_image_cache_for_dataset(
+            scene_record=scene_record,
+            config=config or PreparedFrameDatasetConfig(),
+        )
         self.training_split = training_split
         self.sample_cache = PreparedFrameCache(
-            scene_record,
+            self.scene_record,
             config=self.config,
         )
         self.datasets_by_split = {

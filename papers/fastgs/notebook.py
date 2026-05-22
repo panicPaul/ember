@@ -6,9 +6,7 @@ __generated_with = "0.23.5"
 app = marimo.App(width="medium")
 
 with app.setup:
-    import json
     import math
-    import shutil
     import sys
     import time
     from collections.abc import Sequence
@@ -84,12 +82,6 @@ def _():
 
 
 @app.cell(hide_code=True)
-def _(training_controls):
-    training_controls
-    return
-
-
-@app.cell(hide_code=True)
 def _(training_preparation_status):
     training_preparation_status
     return
@@ -143,6 +135,12 @@ def _(preset_selector):
 @app.cell(hide_code=True)
 def _(config_gui):
     config_gui.stacked()
+    return
+
+
+@app.cell(hide_code=True)
+def _(training_controls):
+    training_controls
     return
 
 
@@ -1294,7 +1292,7 @@ def _(
 
 
 @app.cell
-def _(ember_splatting, training_preparation_snapshot):
+def _(training_preparation_snapshot):
     preparation_status_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
@@ -1309,7 +1307,7 @@ def _(ember_splatting, training_preparation_snapshot):
 
 
 @app.cell
-def _(ember_splatting, training_preparation_snapshot):
+def _(training_preparation_snapshot):
     preparation_outputs_snapshot = (
         training_preparation_snapshot()
         if training_preparation_snapshot is not None
@@ -1324,13 +1322,7 @@ def _(ember_splatting, training_preparation_snapshot):
     ) = ember_splatting.training_preparation_outputs(
         preparation_outputs_snapshot
     )
-    return (
-        scene_load_error,
-        scene_record,
-        frame_dataset,
-        frame_dataset_error,
-        frame_view_catalog,
-    )
+    return frame_dataset, frame_view_catalog
 
 
 @app.cell
@@ -1378,17 +1370,27 @@ def _(
     frame_view_catalog,
     training_inspector,
     training_inspector_refresh,
+    training_result,
     training_viewer_handle,
 ):
-    training_viewer = (
-        None
-        if training_inspector is None
-        else training_inspector.panel(
+    preview_status_panel = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            training_result=training_result,
+        )
+    )
+    if training_inspector is None:
+        training_viewer = preview_status_panel
+    else:
+        fixed_view_panel = training_inspector.panel(
             training_viewer_handle,
             frame_view_catalog,
             refresh=training_inspector_refresh,
         )
-    )
+        training_viewer = mo.vstack(
+            [preview_status_panel, fixed_view_panel],
+            gap=0.75,
+        ).style(max_height="none", overflow="visible")
     return (training_viewer,)
 
 
@@ -1489,612 +1491,609 @@ class HasFastGSDensificationInfo(Protocol):
     densification_info: Float[Tensor, " 4 num_splats"]
 
 
-@app.cell
-def _():
-    class FastGSNotebookDensification(BaseDensificationMethod):
-        """Notebook-local FastGS adaptive density control."""
+@app.class_definition
+class FastGSNotebookDensification(BaseDensificationMethod):
+    """Notebook-local FastGS adaptive density control."""
 
-        expected_scene_families = ("gaussian",)
+    expected_scene_families = ("gaussian",)
 
-        def __init__(
-            self,
-            *,
-            refine_every: int = 100,
-            start_iter: int = 600,
-            stop_iter: int = 14_900,
-            backend: FastGSBackendName = "adapter.fastgs",
-            loss_thresh: float = 0.1,
-            grad_threshold: float = 2e-4,
-            grad_abs_threshold: float = 1.2e-3,
-            dense_fraction: float = 0.01,
-            prune_opacity_threshold: float = 0.005,
-            opacity_reset_every: int = 3_000,
-            extra_opacity_reset_iter: int | None = 500,
-            max_reset_opacity: float = 0.01,
-            scheduled_reset_opacity: float = 0.01,
-            probe_view_count: int = 10,
-            importance_threshold: float = 5.0,
-            metric_map_backend: FastGSMetricMapBackend = "eager",
-            final_prune_start_iter: int = 15_000,
-            final_prune_stop_iter: int = 30_000,
-            final_prune_every: int = 3_000,
-            final_prune_opacity_threshold: float = 0.1,
-            camera_extent: float = 1.0,
-        ) -> None:
-            self.refine_schedule = Schedule(
-                start_iteration=start_iter,
-                end_iteration=stop_iter,
-                frequency=refine_every,
+    def __init__(
+        self,
+        *,
+        refine_every: int = 100,
+        start_iter: int = 600,
+        stop_iter: int = 14_900,
+        backend: FastGSBackendName = "adapter.fastgs",
+        loss_thresh: float = 0.1,
+        grad_threshold: float = 2e-4,
+        grad_abs_threshold: float = 1.2e-3,
+        dense_fraction: float = 0.01,
+        prune_opacity_threshold: float = 0.005,
+        opacity_reset_every: int = 3_000,
+        extra_opacity_reset_iter: int | None = 500,
+        max_reset_opacity: float = 0.01,
+        scheduled_reset_opacity: float = 0.01,
+        probe_view_count: int = 10,
+        importance_threshold: float = 5.0,
+        metric_map_backend: FastGSMetricMapBackend = "eager",
+        final_prune_start_iter: int = 15_000,
+        final_prune_stop_iter: int = 30_000,
+        final_prune_every: int = 3_000,
+        final_prune_opacity_threshold: float = 0.1,
+        camera_extent: float = 1.0,
+    ) -> None:
+        self.refine_schedule = Schedule(
+            start_iteration=start_iter,
+            end_iteration=stop_iter,
+            frequency=refine_every,
+        )
+        self.backend = backend
+        self.stop_iter = stop_iter
+        self.loss_thresh = loss_thresh
+        self.grad_threshold = grad_threshold
+        self.grad_abs_threshold = grad_abs_threshold
+        self.dense_fraction = dense_fraction
+        self.prune_opacity_threshold = prune_opacity_threshold
+        self.opacity_reset_every = opacity_reset_every
+        self.extra_opacity_reset_iter = extra_opacity_reset_iter
+        self.max_reset_opacity = max_reset_opacity
+        self.scheduled_reset_opacity = scheduled_reset_opacity
+        self.probe_view_count = probe_view_count
+        self.importance_threshold = importance_threshold
+        self.metric_map_backend = metric_map_backend
+        self.final_prune_start_iter = final_prune_start_iter
+        self.final_prune_stop_iter = final_prune_stop_iter
+        self.final_prune_every = final_prune_every
+        self.final_prune_opacity_threshold = final_prune_opacity_threshold
+        self.camera_extent = float(camera_extent)
+        self.family_ops: GaussianFamilyOps | None = None
+        self.clone_grad_sum: Tensor | None = None
+        self.split_grad_sum: Tensor | None = None
+        self.visible_count: Tensor | None = None
+        self.max_screen_radii: Tensor | None = None
+
+    def get_render_requirements(
+        self,
+        state: TrainState,
+    ) -> DensificationRenderRequirements:
+        """Collect FastGS visibility accumulators while densification runs."""
+        if self.backend == "adapter.fastgs":
+            return DensificationRenderRequirements()
+        return DensificationRenderRequirements(
+            backend_options={
+                "collect_densification_info": state.step + 1
+                < self.stop_iter
+            }
+        )
+
+    def bind(
+        self, state: Any, optimizers: Sequence[Any], family_ops: Any
+    ) -> None:
+        """Bind Gaussian topology operations."""
+        del state, optimizers
+        if not isinstance(family_ops, GaussianFamilyOps):
+            raise TypeError(
+                "FastGSDensification requires GaussianFamilyOps."
             )
-            self.backend = backend
-            self.stop_iter = stop_iter
-            self.loss_thresh = loss_thresh
-            self.grad_threshold = grad_threshold
-            self.grad_abs_threshold = grad_abs_threshold
-            self.dense_fraction = dense_fraction
-            self.prune_opacity_threshold = prune_opacity_threshold
-            self.opacity_reset_every = opacity_reset_every
-            self.extra_opacity_reset_iter = extra_opacity_reset_iter
-            self.max_reset_opacity = max_reset_opacity
-            self.scheduled_reset_opacity = scheduled_reset_opacity
-            self.probe_view_count = probe_view_count
-            self.importance_threshold = importance_threshold
-            self.metric_map_backend = metric_map_backend
-            self.final_prune_start_iter = final_prune_start_iter
-            self.final_prune_stop_iter = final_prune_stop_iter
-            self.final_prune_every = final_prune_every
-            self.final_prune_opacity_threshold = final_prune_opacity_threshold
-            self.camera_extent = float(camera_extent)
-            self.family_ops: GaussianFamilyOps | None = None
-            self.clone_grad_sum: Tensor | None = None
-            self.split_grad_sum: Tensor | None = None
-            self.visible_count: Tensor | None = None
-            self.max_screen_radii: Tensor | None = None
+        self.family_ops = family_ops
 
-        def get_render_requirements(
-            self,
-            state: TrainState,
-        ) -> DensificationRenderRequirements:
-            """Collect FastGS visibility accumulators while densification runs."""
-            if self.backend == "adapter.fastgs":
-                return DensificationRenderRequirements()
-            return DensificationRenderRequirements(
-                backend_options={
-                    "collect_densification_info": state.step + 1
-                    < self.stop_iter
-                }
+    def post_backward(self, context: DensificationContext) -> None:
+        """Accumulate FastGS screen-space densification statistics."""
+        if context.step + 1 >= self.stop_iter:
+            return
+        if self.backend == "adapter.fastgs":
+            self._accumulate_adapter_gradients(context)
+            return
+        self._accumulate_native_densification_info(context)
+
+    def pre_optimizer_step(self, context: DensificationContext) -> None:
+        """Run scheduled clone/split/prune/reset actions before optimizer."""
+        if self.family_ops is None:
+            return
+        scene = context.state.model.scene
+        if not isinstance(scene, ember.GaussianScene):
+            return
+        upstream_iteration = context.step + 1
+        if self.refine_schedule.includes(upstream_iteration):
+            self.adaptive_density_control(
+                context, scene, upstream_iteration
             )
+            self.reset_accumulators()
+        if self.should_reset_opacity(upstream_iteration):
+            self.family_ops.reset_opacity(self.scheduled_reset_opacity)
+        if self.should_final_prune(upstream_iteration):
+            pruning_score = self.compute_pruning_score(context)
+            self.final_prune(pruning_score)
 
-        def bind(
-            self, state: Any, optimizers: Sequence[Any], family_ops: Any
-        ) -> None:
-            """Bind Gaussian topology operations."""
-            del state, optimizers
-            if not isinstance(family_ops, GaussianFamilyOps):
-                raise TypeError(
-                    "FastGSDensification requires GaussianFamilyOps."
-                )
-            self.family_ops = family_ops
+    def adaptive_density_control(
+        self,
+        context: DensificationContext,
+        scene: ember.GaussianScene,
+        step: int,
+    ) -> None:
+        if (
+            self.visible_count is None
+            or self.clone_grad_sum is None
+            or self.split_grad_sum is None
+            or self.max_screen_radii is None
+        ):
+            return
+        assert self.family_ops is not None
+        score_started_at = time.perf_counter()
+        importance_score, pruning_score = self.compute_fastgs_scores(
+            context,
+            densify=True,
+        )
+        self._record_metric(
+            context,
+            "refinement_fastgs_score_ms",
+            (time.perf_counter() - score_started_at) * 1000.0,
+        )
+        avg_clone_grad = self.clone_grad_sum / self.visible_count.clamp_min(
+            1.0
+        )
+        avg_split_grad = self.split_grad_sum / self.visible_count.clamp_min(
+            1.0
+        )
+        scales = torch.exp(scene.log_scales).max(dim=-1).values
+        metric_mask = importance_score > self.importance_threshold
+        clone_mask = (
+            (avg_clone_grad >= self.grad_threshold)
+            & (scales <= self.dense_fraction * self.camera_extent)
+            & metric_mask
+        )
+        split_mask = (
+            (avg_split_grad >= self.grad_abs_threshold)
+            & (scales > self.dense_fraction * self.camera_extent)
+            & metric_mask
+        )
+        grown_max_screen_radii = self._grown_zero_accumulator_values(
+            self.max_screen_radii,
+            clone_mask,
+            split_mask,
+            num_children=2,
+        )
 
-        def post_backward(self, context: DensificationContext) -> None:
-            """Accumulate FastGS screen-space densification statistics."""
-            if context.step + 1 >= self.stop_iter:
-                return
-            if self.backend == "adapter.fastgs":
-                self._accumulate_adapter_gradients(context)
-                return
-            self._accumulate_native_densification_info(context)
+        prune_sampling_ms = 0.0
 
-        def pre_optimizer_step(self, context: DensificationContext) -> None:
-            """Run scheduled clone/split/prune/reset actions before optimizer."""
-            if self.family_ops is None:
-                return
-            scene = context.state.model.scene
-            if not isinstance(scene, ember.GaussianScene):
-                return
-            upstream_iteration = context.step + 1
-            if self.refine_schedule.includes(upstream_iteration):
-                self.adaptive_density_control(
-                    context, scene, upstream_iteration
-                )
-                self.reset_accumulators()
-            if self.should_reset_opacity(upstream_iteration):
-                self.family_ops.reset_opacity(self.scheduled_reset_opacity)
-            if self.should_final_prune(upstream_iteration):
-                pruning_score = self.compute_pruning_score(context)
-                self.final_prune(pruning_score)
-
-        def adaptive_density_control(
-            self,
-            context: DensificationContext,
-            scene: ember.GaussianScene,
-            step: int,
-        ) -> None:
+        def refinement_keep_mask(
+            grown_scene: ember.GaussianScene,
+        ) -> Tensor:
+            nonlocal prune_sampling_ms
+            keep_mask = torch.sigmoid(grown_scene.logit_opacity) >= (
+                self.prune_opacity_threshold
+            )
             if (
-                self.visible_count is None
-                or self.clone_grad_sum is None
-                or self.split_grad_sum is None
-                or self.max_screen_radii is None
+                step > self.opacity_reset_every
+                and grown_scene.center_position.shape[0] > 0
             ):
-                return
-            assert self.family_ops is not None
-            score_started_at = time.perf_counter()
-            importance_score, pruning_score = self.compute_fastgs_scores(
-                context,
-                densify=True,
-            )
-            self._record_metric(
-                context,
-                "refinement_fastgs_score_ms",
-                (time.perf_counter() - score_started_at) * 1000.0,
-            )
-            avg_clone_grad = self.clone_grad_sum / self.visible_count.clamp_min(
-                1.0
-            )
-            avg_split_grad = self.split_grad_sum / self.visible_count.clamp_min(
-                1.0
-            )
-            scales = torch.exp(scene.log_scales).max(dim=-1).values
-            metric_mask = importance_score > self.importance_threshold
-            clone_mask = (
-                (avg_clone_grad >= self.grad_threshold)
-                & (scales <= self.dense_fraction * self.camera_extent)
-                & metric_mask
-            )
-            split_mask = (
-                (avg_split_grad >= self.grad_abs_threshold)
-                & (scales > self.dense_fraction * self.camera_extent)
-                & metric_mask
-            )
-            grown_max_screen_radii = self._grown_zero_accumulator_values(
-                self.max_screen_radii,
-                clone_mask,
-                split_mask,
-                num_children=2,
-            )
-
-            prune_sampling_ms = 0.0
-
-            def refinement_keep_mask(
-                grown_scene: ember.GaussianScene,
-            ) -> Tensor:
-                nonlocal prune_sampling_ms
-                keep_mask = torch.sigmoid(grown_scene.logit_opacity) >= (
-                    self.prune_opacity_threshold
+                max_scale = (
+                    torch.exp(grown_scene.log_scales).max(dim=-1).values
                 )
-                if (
-                    step > self.opacity_reset_every
-                    and grown_scene.center_position.shape[0] > 0
-                ):
-                    max_scale = (
-                        torch.exp(grown_scene.log_scales).max(dim=-1).values
-                    )
-                    keep_mask &= max_scale <= 0.1 * self.camera_extent
-                    keep_mask &= grown_max_screen_radii <= 20.0
-                prune_started_at = time.perf_counter()
-                sampled_prune_mask = self._sample_refinement_prune_mask(
-                    ~keep_mask,
-                    pruning_score,
-                )
-                prune_sampling_ms += (
-                    time.perf_counter() - prune_started_at
-                ) * 1000.0
-                keep_mask = ~sampled_prune_mask
-                keep_mask &= (
-                    grown_scene.quaternion_orientation.square().sum(dim=1)
-                    >= 1e-8
-                )
-                return keep_mask
+                keep_mask &= max_scale <= 0.1 * self.camera_extent
+                keep_mask &= grown_max_screen_radii <= 20.0
+            prune_started_at = time.perf_counter()
+            sampled_prune_mask = self._sample_refinement_prune_mask(
+                ~keep_mask,
+                pruning_score,
+            )
+            prune_sampling_ms += (
+                time.perf_counter() - prune_started_at
+            ) * 1000.0
+            keep_mask = ~sampled_prune_mask
+            keep_mask &= (
+                grown_scene.quaternion_orientation.square().sum(dim=1)
+                >= 1e-8
+            )
+            return keep_mask
 
-            topology_started_at = time.perf_counter()
-            self.family_ops.clone_and_split(
-                clone_mask,
-                split_mask,
-                num_children=2,
-                scale_shrink=0.625,
-                prune_fn=refinement_keep_mask,
-                prune_field_names=(
-                    "center_position",
-                    "logit_opacity",
-                    "log_scales",
-                    "quaternion_orientation",
+        topology_started_at = time.perf_counter()
+        self.family_ops.clone_and_split(
+            clone_mask,
+            split_mask,
+            num_children=2,
+            scale_shrink=0.625,
+            prune_fn=refinement_keep_mask,
+            prune_field_names=(
+                "center_position",
+                "logit_opacity",
+                "log_scales",
+                "quaternion_orientation",
+            ),
+        )
+        self._record_metric(
+            context,
+            "refinement_fastgs_topology_ms",
+            (time.perf_counter() - topology_started_at) * 1000.0,
+        )
+        self._record_metric(
+            context,
+            "refinement_fastgs_prune_sampling_ms",
+            prune_sampling_ms,
+        )
+        reset_started_at = time.perf_counter()
+        self.family_ops.reset_opacity(self.max_reset_opacity)
+        self._record_metric(
+            context,
+            "refinement_fastgs_opacity_reset_ms",
+            (time.perf_counter() - reset_started_at) * 1000.0,
+        )
+
+    def _sample_refinement_prune_mask(
+        self,
+        prune_mask: Tensor,
+        pruning_score: Tensor,
+    ) -> Tensor:
+        """Apply upstream FastGS' budgeted refinement prune sampling."""
+        remove_budget = int(0.5 * int(prune_mask.sum().item()))
+        if remove_budget <= 0 or pruning_score.numel() == 0:
+            return torch.zeros_like(prune_mask)
+        scores = 1.0 - pruning_score.reshape(-1)
+        weighted_count = min(int(scores.numel()), int(prune_mask.numel()))
+        padded_importance = torch.zeros(
+            (int(prune_mask.numel()),),
+            dtype=torch.float32,
+            device=prune_mask.device,
+        )
+        padded_importance[:weighted_count] = 1.0 / (
+            1e-6 + scores[:weighted_count].clamp_min(0.0)
+        ).to(device=prune_mask.device, dtype=torch.float32)
+        sampled_indices = torch.multinomial(
+            padded_importance,
+            remove_budget,
+            replacement=False,
+        )
+        sampled_mask = torch.zeros_like(prune_mask)
+        sampled_mask[sampled_indices] = True
+        return prune_mask & sampled_mask
+
+    def should_reset_opacity(self, step: int) -> bool:
+        scheduled = (
+            step >= self.opacity_reset_every
+            and step <= self.stop_iter
+            and step % self.opacity_reset_every == 0
+        )
+        return scheduled or (
+            self.extra_opacity_reset_iter is not None
+            and step == self.extra_opacity_reset_iter
+        )
+
+    def should_final_prune(self, step: int) -> bool:
+        return (
+            step > self.final_prune_start_iter
+            and step < self.final_prune_stop_iter
+            and step % self.final_prune_every == 0
+        )
+
+    def reset_accumulators(self) -> None:
+        self.clone_grad_sum = None
+        self.split_grad_sum = None
+        self.visible_count = None
+        self.max_screen_radii = None
+
+    def _append_zero_accumulator_values(self, count: int) -> None:
+        if count <= 0:
+            return
+        for name in (
+            "clone_grad_sum",
+            "split_grad_sum",
+            "visible_count",
+            "max_screen_radii",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            setattr(
+                self,
+                name,
+                torch.cat(
+                    [
+                        value,
+                        torch.zeros(
+                            (count,),
+                            dtype=value.dtype,
+                            device=value.device,
+                        ),
+                    ]
                 ),
             )
-            self._record_metric(
-                context,
-                "refinement_fastgs_topology_ms",
-                (time.perf_counter() - topology_started_at) * 1000.0,
-            )
-            self._record_metric(
-                context,
-                "refinement_fastgs_prune_sampling_ms",
-                prune_sampling_ms,
-            )
-            reset_started_at = time.perf_counter()
-            self.family_ops.reset_opacity(self.max_reset_opacity)
-            self._record_metric(
-                context,
-                "refinement_fastgs_opacity_reset_ms",
-                (time.perf_counter() - reset_started_at) * 1000.0,
-            )
 
-        def _sample_refinement_prune_mask(
-            self,
-            prune_mask: Tensor,
-            pruning_score: Tensor,
-        ) -> Tensor:
-            """Apply upstream FastGS' budgeted refinement prune sampling."""
-            remove_budget = int(0.5 * int(prune_mask.sum().item()))
-            if remove_budget <= 0 or pruning_score.numel() == 0:
-                return torch.zeros_like(prune_mask)
-            scores = 1.0 - pruning_score.reshape(-1)
-            weighted_count = min(int(scores.numel()), int(prune_mask.numel()))
-            padded_importance = torch.zeros(
-                (int(prune_mask.numel()),),
-                dtype=torch.float32,
-                device=prune_mask.device,
-            )
-            padded_importance[:weighted_count] = 1.0 / (
-                1e-6 + scores[:weighted_count].clamp_min(0.0)
-            ).to(device=prune_mask.device, dtype=torch.float32)
-            sampled_indices = torch.multinomial(
-                padded_importance,
-                remove_budget,
-                replacement=False,
-            )
-            sampled_mask = torch.zeros_like(prune_mask)
-            sampled_mask[sampled_indices] = True
-            return prune_mask & sampled_mask
-
-        def should_reset_opacity(self, step: int) -> bool:
-            scheduled = (
-                step >= self.opacity_reset_every
-                and step <= self.stop_iter
-                and step % self.opacity_reset_every == 0
-            )
-            return scheduled or (
-                self.extra_opacity_reset_iter is not None
-                and step == self.extra_opacity_reset_iter
-            )
-
-        def should_final_prune(self, step: int) -> bool:
-            return (
-                step > self.final_prune_start_iter
-                and step < self.final_prune_stop_iter
-                and step % self.final_prune_every == 0
-            )
-
-        def reset_accumulators(self) -> None:
-            self.clone_grad_sum = None
-            self.split_grad_sum = None
-            self.visible_count = None
-            self.max_screen_radii = None
-
-        def _append_zero_accumulator_values(self, count: int) -> None:
-            if count <= 0:
-                return
-            for name in (
-                "clone_grad_sum",
-                "split_grad_sum",
-                "visible_count",
-                "max_screen_radii",
-            ):
-                value = getattr(self, name)
-                if value is None:
-                    continue
-                setattr(
-                    self,
-                    name,
-                    torch.cat(
-                        [
-                            value,
-                            torch.zeros(
-                                (count,),
-                                dtype=value.dtype,
-                                device=value.device,
-                            ),
-                        ]
-                    ),
-                )
-
-        def _split_accumulator_values(
-            self,
-            split_mask: torch.Tensor,
-            *,
-            num_children: int,
-        ) -> None:
-            for name in (
-                "clone_grad_sum",
-                "split_grad_sum",
-                "visible_count",
-                "max_screen_radii",
-            ):
-                value = getattr(self, name)
-                if value is None:
-                    continue
-                child_count = int(split_mask.sum().item()) * num_children
-                setattr(
-                    self,
-                    name,
-                    torch.cat(
-                        [
-                            value[~split_mask],
-                            torch.zeros(
-                                (child_count,),
-                                dtype=value.dtype,
-                                device=value.device,
-                            ),
-                        ]
-                    ),
-                )
-
-        def _grown_zero_accumulator_values(
-            self,
-            value: Tensor,
-            clone_mask: Tensor,
-            split_mask: Tensor,
-            *,
-            num_children: int,
-        ) -> Tensor:
-            """Return accumulator values in fused clone/split output order."""
-            clone_count = int(clone_mask.sum().item())
-            split_child_count = int(split_mask.sum().item()) * num_children
-            return torch.cat(
-                [
-                    value[~split_mask],
-                    torch.zeros(
-                        (clone_count,),
-                        dtype=value.dtype,
-                        device=value.device,
-                    ),
-                    torch.zeros(
-                        (split_child_count,),
-                        dtype=value.dtype,
-                        device=value.device,
-                    ),
-                ]
-            )
-
-        def _ensure_buffers(
-            self,
-            *,
-            num_splats: int,
-            dtype: torch.dtype,
-            device: torch.device,
-        ) -> None:
-            shape = (num_splats,)
-            if (
-                self.clone_grad_sum is None
-                or self.clone_grad_sum.shape != shape
-            ):
-                self.clone_grad_sum = torch.zeros(
-                    shape, dtype=dtype, device=device
-                )
-                self.split_grad_sum = torch.zeros(
-                    shape, dtype=dtype, device=device
-                )
-                self.visible_count = torch.zeros(
-                    shape, dtype=dtype, device=device
-                )
-                self.max_screen_radii = torch.zeros(
-                    shape,
-                    dtype=dtype,
-                    device=device,
-                )
-
-        def _accumulate_native_densification_info(
-            self,
-            context: DensificationContext,
-        ) -> None:
-            if not isinstance(
-                context.render_output, HasFastGSDensificationInfo
-            ):
-                raise TypeError(
-                    "FastGSDensification requires render outputs with "
-                    "densification_info."
-                )
-            scene = context.state.model.scene
-            densification_info = (
-                context.render_output.densification_info.detach()
-            )
-            if densification_info.ndim != 2 or densification_info.shape[0] != 4:
-                raise ValueError(
-                    "FastGS densification_info must have shape "
-                    f"(4, num_splats), got {tuple(densification_info.shape)}."
-                )
-            self._ensure_buffers(
-                num_splats=int(scene.center_position.shape[0]),
-                dtype=scene.center_position.dtype,
-                device=scene.center_position.device,
-            )
-            assert self.clone_grad_sum is not None
-            assert self.split_grad_sum is not None
-            assert self.visible_count is not None
-            assert self.max_screen_radii is not None
-            self.visible_count += densification_info[0]
-            self.clone_grad_sum += densification_info[1]
-            self.split_grad_sum += densification_info[2]
-            self.max_screen_radii = torch.maximum(
-                self.max_screen_radii,
-                densification_info[3].to(dtype=self.max_screen_radii.dtype),
-            )
-
-        def _accumulate_adapter_gradients(
-            self,
-            context: DensificationContext,
-        ) -> None:
-            output = context.render_output
-            if not all(
-                hasattr(output, name)
-                for name in ("viewspace_points", "visibility_filter", "radii")
-            ):
-                raise TypeError(
-                    "adapter.fastgs densification requires viewspace_points, "
-                    "visibility_filter, and radii render outputs."
-                )
-            gradients = output.viewspace_points.grad
-            if gradients is None:
-                return
-            scene = context.state.model.scene
-            self._ensure_buffers(
-                num_splats=int(scene.center_position.shape[0]),
-                dtype=scene.center_position.dtype,
-                device=scene.center_position.device,
-            )
-            assert self.clone_grad_sum is not None
-            assert self.split_grad_sum is not None
-            assert self.visible_count is not None
-            assert self.max_screen_radii is not None
-            visibility = output.visibility_filter.to(gradients.dtype)
-            self.clone_grad_sum += (
-                gradients[..., :2].norm(dim=-1) * visibility
-            ).sum(dim=0)
-            self.split_grad_sum += (
-                gradients[..., 2:].norm(dim=-1) * visibility
-            ).sum(dim=0)
-            self.visible_count += visibility.sum(dim=0)
-            visible_radii = torch.where(
-                output.visibility_filter,
-                output.radii.to(scene.center_position.dtype),
-                torch.zeros_like(
-                    output.radii, dtype=scene.center_position.dtype
+    def _split_accumulator_values(
+        self,
+        split_mask: torch.Tensor,
+        *,
+        num_children: int,
+    ) -> None:
+        for name in (
+            "clone_grad_sum",
+            "split_grad_sum",
+            "visible_count",
+            "max_screen_radii",
+        ):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            child_count = int(split_mask.sum().item()) * num_children
+            setattr(
+                self,
+                name,
+                torch.cat(
+                    [
+                        value[~split_mask],
+                        torch.zeros(
+                            (child_count,),
+                            dtype=value.dtype,
+                            device=value.device,
+                        ),
+                    ]
                 ),
             )
-            self.max_screen_radii = torch.maximum(
-                self.max_screen_radii,
-                visible_radii.max(dim=0).values,
+
+    def _grown_zero_accumulator_values(
+        self,
+        value: Tensor,
+        clone_mask: Tensor,
+        split_mask: Tensor,
+        *,
+        num_children: int,
+    ) -> Tensor:
+        """Return accumulator values in fused clone/split output order."""
+        clone_count = int(clone_mask.sum().item())
+        split_child_count = int(split_mask.sum().item()) * num_children
+        return torch.cat(
+            [
+                value[~split_mask],
+                torch.zeros(
+                    (clone_count,),
+                    dtype=value.dtype,
+                    device=value.device,
+                ),
+                torch.zeros(
+                    (split_child_count,),
+                    dtype=value.dtype,
+                    device=value.device,
+                ),
+            ]
+        )
+
+    def _ensure_buffers(
+        self,
+        *,
+        num_splats: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> None:
+        shape = (num_splats,)
+        if (
+            self.clone_grad_sum is None
+            or self.clone_grad_sum.shape != shape
+        ):
+            self.clone_grad_sum = torch.zeros(
+                shape, dtype=dtype, device=device
+            )
+            self.split_grad_sum = torch.zeros(
+                shape, dtype=dtype, device=device
+            )
+            self.visible_count = torch.zeros(
+                shape, dtype=dtype, device=device
+            )
+            self.max_screen_radii = torch.zeros(
+                shape,
+                dtype=dtype,
+                device=device,
             )
 
-        def compute_fastgs_scores(
-            self,
-            context: DensificationContext,
-            *,
-            densify: bool,
-        ) -> tuple[Tensor, Tensor]:
-            """Compute FastGS multi-view consistency scores."""
-            attribution = self.require_runtime_trait(
-                context,
-                GaussianMetricAttribution,
+    def _accumulate_native_densification_info(
+        self,
+        context: DensificationContext,
+    ) -> None:
+        if not isinstance(
+            context.render_output, HasFastGSDensificationInfo
+        ):
+            raise TypeError(
+                "FastGSDensification requires render outputs with "
+                "densification_info."
             )
-            if context.runtime is None:
-                raise RuntimeError("FastGS scoring requires a runtime.")
-            probe_views = context.runtime.sample_views(self.probe_view_count)
-            scene = context.state.model.scene
-            importance_sum = torch.zeros(
-                int(scene.center_position.shape[0]),
-                dtype=scene.center_position.dtype,
-                device=scene.center_position.device,
+        scene = context.state.model.scene
+        densification_info = (
+            context.render_output.densification_info.detach()
+        )
+        if densification_info.ndim != 2 or densification_info.shape[0] != 4:
+            raise ValueError(
+                "FastGS densification_info must have shape "
+                f"(4, num_splats), got {tuple(densification_info.shape)}."
             )
-            pruning_sum = torch.zeros_like(importance_sum)
-            if not probe_views:
-                return importance_sum, pruning_sum
-            # Probe renders drive the paper view-consistency scores.
-            for sample in probe_views:
-                probe_output = context.runtime.render_raw(
-                    context.state.model,
-                    sample.camera,
+        self._ensure_buffers(
+            num_splats=int(scene.center_position.shape[0]),
+            dtype=scene.center_position.dtype,
+            device=scene.center_position.device,
+        )
+        assert self.clone_grad_sum is not None
+        assert self.split_grad_sum is not None
+        assert self.visible_count is not None
+        assert self.max_screen_radii is not None
+        self.visible_count += densification_info[0]
+        self.clone_grad_sum += densification_info[1]
+        self.split_grad_sum += densification_info[2]
+        self.max_screen_radii = torch.maximum(
+            self.max_screen_radii,
+            densification_info[3].to(dtype=self.max_screen_radii.dtype),
+        )
+
+    def _accumulate_adapter_gradients(
+        self,
+        context: DensificationContext,
+    ) -> None:
+        output = context.render_output
+        if not all(
+            hasattr(output, name)
+            for name in ("viewspace_points", "visibility_filter", "radii")
+        ):
+            raise TypeError(
+                "adapter.fastgs densification requires viewspace_points, "
+                "visibility_filter, and radii render outputs."
+            )
+        gradients = output.viewspace_points.grad
+        if gradients is None:
+            return
+        scene = context.state.model.scene
+        self._ensure_buffers(
+            num_splats=int(scene.center_position.shape[0]),
+            dtype=scene.center_position.dtype,
+            device=scene.center_position.device,
+        )
+        assert self.clone_grad_sum is not None
+        assert self.split_grad_sum is not None
+        assert self.visible_count is not None
+        assert self.max_screen_radii is not None
+        visibility = output.visibility_filter.to(gradients.dtype)
+        self.clone_grad_sum += (
+            gradients[..., :2].norm(dim=-1) * visibility
+        ).sum(dim=0)
+        self.split_grad_sum += (
+            gradients[..., 2:].norm(dim=-1) * visibility
+        ).sum(dim=0)
+        self.visible_count += visibility.sum(dim=0)
+        visible_radii = torch.where(
+            output.visibility_filter,
+            output.radii.to(scene.center_position.dtype),
+            torch.zeros_like(
+                output.radii, dtype=scene.center_position.dtype
+            ),
+        )
+        self.max_screen_radii = torch.maximum(
+            self.max_screen_radii,
+            visible_radii.max(dim=0).values,
+        )
+
+    def compute_fastgs_scores(
+        self,
+        context: DensificationContext,
+        *,
+        densify: bool,
+    ) -> tuple[Tensor, Tensor]:
+        """Compute FastGS multi-view consistency scores."""
+        attribution = self.require_runtime_trait(
+            context,
+            GaussianMetricAttribution,
+        )
+        if context.runtime is None:
+            raise RuntimeError("FastGS scoring requires a runtime.")
+        probe_views = context.runtime.sample_views(self.probe_view_count)
+        scene = context.state.model.scene
+        importance_sum = torch.zeros(
+            int(scene.center_position.shape[0]),
+            dtype=scene.center_position.dtype,
+            device=scene.center_position.device,
+        )
+        pruning_sum = torch.zeros_like(importance_sum)
+        if not probe_views:
+            return importance_sum, pruning_sum
+        # Probe renders drive the paper view-consistency scores.
+        for sample in probe_views:
+            probe_output = context.runtime.render_raw(
+                context.state.model,
+                sample.camera,
+            )
+            predicted = probe_output.render[0]
+            target = sample.image
+            metric_map = self._metric_map(predicted, target)
+            photometric_loss = self._photometric_loss(predicted, target)
+            attributed = attribution.attribute_metric_map(
+                scene,
+                sample.camera,
+                metric_map,
+                options=context.runtime.render_options,
+            )
+            if densify:
+                importance_sum += attributed
+            pruning_sum += photometric_loss * attributed
+        importance_score = torch.div(
+            importance_sum,
+            float(len(probe_views)),
+            rounding_mode="floor",
+        )
+        return importance_score, self._normalize_score(pruning_sum)
+
+    def compute_pruning_score(
+        self, context: DensificationContext
+    ) -> Tensor:
+        """Compute only the FastGS VCP score."""
+        _importance_score, pruning_score = self.compute_fastgs_scores(
+            context,
+            densify=False,
+        )
+        return pruning_score
+
+    def final_prune(self, pruning_score: Tensor) -> None:
+        """Apply FastGS final-stage VCP pruning."""
+        if self.family_ops is None:
+            return
+        scene = self.family_ops.scene
+        prune_mask = (
+            torch.sigmoid(scene.logit_opacity)
+            < self.final_prune_opacity_threshold
+        )
+        if pruning_score.numel() == prune_mask.numel():
+            prune_mask |= pruning_score > 0.9
+        if torch.any(prune_mask):
+            self.family_ops.prune(~prune_mask)
+
+    def _normalize_score(self, score: Tensor) -> Tensor:
+        """Normalize a FastGS score tensor before thresholding."""
+        return fastgs_normalize_score(score)
+
+    def _metric_map(
+        self,
+        predicted: Tensor,
+        target: Tensor,
+    ) -> Tensor:
+        """Compute the metric map used by FastGS densification."""
+        if self.metric_map_backend == "compile":
+            try:
+                return compiled_fastgs_l1_metric_map(
+                    predicted,
+                    target,
+                    self.loss_thresh,
                 )
-                predicted = probe_output.render[0]
-                target = sample.image
-                metric_map = self._metric_map(predicted, target)
-                photometric_loss = self._photometric_loss(predicted, target)
-                attributed = attribution.attribute_metric_map(
-                    scene,
-                    sample.camera,
-                    metric_map,
-                    options=context.runtime.render_options,
+            except Exception:
+                return fastgs_l1_metric_map(
+                    predicted,
+                    target,
+                    self.loss_thresh,
                 )
-                if densify:
-                    importance_sum += attributed
-                pruning_sum += photometric_loss * attributed
-            importance_score = torch.div(
-                importance_sum,
-                float(len(probe_views)),
-                rounding_mode="floor",
-            )
-            return importance_score, self._normalize_score(pruning_sum)
+        return fastgs_l1_metric_map(
+            predicted,
+            target,
+            self.loss_thresh,
+        )
 
-        def compute_pruning_score(
-            self, context: DensificationContext
-        ) -> Tensor:
-            """Compute only the FastGS VCP score."""
-            _importance_score, pruning_score = self.compute_fastgs_scores(
-                context,
-                densify=False,
-            )
-            return pruning_score
+    def _photometric_loss(
+        self,
+        predicted: Tensor,
+        target: Tensor,
+    ) -> Tensor:
+        """Compute the FastGS L1-plus-SSIM probe loss."""
+        l1_loss = (predicted - target).abs().mean()
+        from ember_splatting_training.losses import ssim_score
 
-        def final_prune(self, pruning_score: Tensor) -> None:
-            """Apply FastGS final-stage VCP pruning."""
-            if self.family_ops is None:
-                return
-            scene = self.family_ops.scene
-            prune_mask = (
-                torch.sigmoid(scene.logit_opacity)
-                < self.final_prune_opacity_threshold
-            )
-            if pruning_score.numel() == prune_mask.numel():
-                prune_mask |= pruning_score > 0.9
-            if torch.any(prune_mask):
-                self.family_ops.prune(~prune_mask)
+        one_minus_ssim = 1.0 - ssim_score(
+            predicted[None, ...],
+            target[None, ...],
+        )
+        return 0.8 * l1_loss + 0.2 * one_minus_ssim
 
-        def _normalize_score(self, score: Tensor) -> Tensor:
-            """Normalize a FastGS score tensor before thresholding."""
-            return fastgs_normalize_score(score)
-
-        def _metric_map(
-            self,
-            predicted: Tensor,
-            target: Tensor,
-        ) -> Tensor:
-            """Compute the metric map used by FastGS densification."""
-            if self.metric_map_backend == "compile":
-                try:
-                    return compiled_fastgs_l1_metric_map(
-                        predicted,
-                        target,
-                        self.loss_thresh,
-                    )
-                except Exception:
-                    return fastgs_l1_metric_map(
-                        predicted,
-                        target,
-                        self.loss_thresh,
-                    )
-            return fastgs_l1_metric_map(
-                predicted,
-                target,
-                self.loss_thresh,
-            )
-
-        def _photometric_loss(
-            self,
-            predicted: Tensor,
-            target: Tensor,
-        ) -> Tensor:
-            """Compute the FastGS L1-plus-SSIM probe loss."""
-            l1_loss = (predicted - target).abs().mean()
-            from ember_splatting_training.losses import ssim_score
-
-            one_minus_ssim = 1.0 - ssim_score(
-                predicted[None, ...],
-                target[None, ...],
-            )
-            return 0.8 * l1_loss + 0.2 * one_minus_ssim
-
-        def _record_metric(
-            self,
-            context: DensificationContext,
-            name: str,
-            value: float,
-        ) -> None:
-            """Publish a densification metric to the training diagnostics."""
-            diagnostics = getattr(context.state, "diagnostics", None)
-            if not isinstance(diagnostics, dict):
-                return
-            diagnostics.setdefault("metrics", {})[name] = float(value)
-
-    return
+    def _record_metric(
+        self,
+        context: DensificationContext,
+        name: str,
+        value: float,
+    ) -> None:
+        """Publish a densification metric to the training diagnostics."""
+        diagnostics = getattr(context.state, "diagnostics", None)
+        if not isinstance(diagnostics, dict):
+            return
+        diagnostics.setdefault("metrics", {})[name] = float(value)
 
 
 @app.function
@@ -2171,163 +2170,6 @@ def _():
 
 
 @app.function
-def fastgs_resized_cache_enabled(config: FastGSExperimentConfig) -> bool:
-    """Return whether FastGS should use a derived resized image cache."""
-    return (
-        config.data.cache_resized_images
-        and config.data.image_scale_factor != 1.0
-    )
-
-
-@app.function
-def fastgs_resized_cache_parent(config: FastGSExperimentConfig) -> Path:
-    """Return the reusable derived image cache parent for the scene."""
-    if config.data.resized_image_cache_root is not None:
-        return config.data.resized_image_cache_root.expanduser()
-    return config.scene.path.expanduser() / "ember_cache" / "resized_images"
-
-
-@app.function
-def fastgs_source_image_root(config: FastGSExperimentConfig) -> Path:
-    """Return the full-resolution source image root."""
-    if config.scene.image_root is not None:
-        return config.scene.image_root.expanduser()
-    return config.scene.path.expanduser() / "images"
-
-
-@app.function
-def fastgs_resized_cache_root(config: FastGSExperimentConfig) -> Path:
-    """Return the derived resized image cache root for this config."""
-    scale_name = f"{config.data.image_scale_factor:.6f}".rstrip("0").rstrip(".")
-    scale_name = scale_name.replace(".", "p")
-    return fastgs_resized_cache_parent(config) / (
-        f"scale_{scale_name}_{config.data.interpolation}"
-    )
-
-
-@app.function
-def fastgs_pillow_resampling(interpolation: str) -> Any:
-    """Translate notebook interpolation names to Pillow resampling filters."""
-    from PIL import Image
-
-    if interpolation == "nearest":
-        return Image.Resampling.NEAREST
-    if interpolation == "bilinear":
-        return Image.Resampling.BILINEAR
-    if interpolation == "bicubic":
-        return Image.Resampling.BICUBIC
-    raise ValueError(f"Unsupported interpolation mode {interpolation!r}.")
-
-
-@app.function
-def enforce_fastgs_resized_cache_limit(
-    *,
-    cache_root: Path,
-    max_caches: int,
-) -> None:
-    """Keep only a bounded number of reusable resized image caches."""
-    parent = cache_root.parent
-    if not parent.exists():
-        return
-    cache_dirs = [
-        path
-        for path in parent.iterdir()
-        if path.is_dir() and path.name.startswith("scale_")
-    ]
-    overflow = len(cache_dirs) - max_caches
-    if overflow <= 0:
-        return
-    evictable = sorted(
-        (path for path in cache_dirs if path != cache_root),
-        key=lambda path: path.stat().st_mtime,
-    )
-    for stale_cache in evictable[:overflow]:
-        shutil.rmtree(stale_cache)
-
-
-@app.function
-def materialize_fastgs_resized_image_cache(
-    *,
-    source_root: Path,
-    cache_root: Path,
-    scale: float,
-    interpolation: str,
-    max_caches: int,
-) -> Path:
-    """Create/update a derived resized image cache from full-res images."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from PIL import Image
-    from tqdm.auto import tqdm
-
-    image_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    source_paths = sorted(
-        path
-        for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in image_suffixes
-    )
-    if not source_paths:
-        raise ValueError(f"No source images found under {source_root}.")
-    resampling = fastgs_pillow_resampling(interpolation)
-    enforce_fastgs_resized_cache_limit(
-        cache_root=cache_root,
-        max_caches=max_caches,
-    )
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    def resize_one(source_path: Path) -> None:
-        relative_path = source_path.relative_to(source_root)
-        target_path = cache_root / relative_path
-        if (
-            target_path.exists()
-            and target_path.stat().st_mtime >= source_path.stat().st_mtime
-        ):
-            return
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(source_path) as image:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-            resized_size = (
-                max(1, round(width * scale)),
-                max(1, round(height * scale)),
-            )
-            resized = rgb.resize(resized_size, resampling)
-            save_kwargs = (
-                {"quality": 95}
-                if target_path.suffix.lower() in {".jpg", ".jpeg"}
-                else {}
-            )
-            resized.save(target_path, **save_kwargs)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(resize_one, path) for path in source_paths]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc="Preparing resized image cache",
-        ):
-            future.result()
-    (cache_root / "cache_metadata.json").write_text(
-        json.dumps(
-            {
-                "source_root": str(source_root),
-                "scale": scale,
-                "interpolation": interpolation,
-                "num_images": len(source_paths),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    cache_root.touch()
-    enforce_fastgs_resized_cache_limit(
-        cache_root=cache_root,
-        max_caches=max_caches,
-    )
-    return cache_root
-
-
-@app.function
 def build_scene_load_config(
     config: FastGSExperimentConfig,
 ) -> ember.ColmapSceneConfig:
@@ -2336,19 +2178,9 @@ def build_scene_load_config(
         (ember.HorizonAlignPipeConfig(),) if config.scene.align_horizon else ()
     )
     image_root = (
-        materialize_fastgs_resized_image_cache(
-            source_root=fastgs_source_image_root(config),
-            cache_root=fastgs_resized_cache_root(config),
-            scale=config.data.image_scale_factor,
-            interpolation=config.data.interpolation,
-            max_caches=config.data.max_resized_image_caches,
-        )
-        if fastgs_resized_cache_enabled(config)
-        else (
-            config.scene.image_root.expanduser()
-            if config.scene.image_root is not None
-            else None
-        )
+        config.scene.image_root.expanduser()
+        if config.scene.image_root is not None
+        else None
     )
     return ember.ColmapSceneConfig(
         path=config.scene.path.expanduser(),
@@ -2386,13 +2218,14 @@ def build_prepared_frame_dataset_config(
         ),
         image_preparation=ember.ImagePreparationConfig(
             normalize=config.data.normalize_images,
-            resize_width_scale=(
-                None
-                if fastgs_resized_cache_enabled(config)
-                else config.data.image_scale_factor
-            ),
+            resize_width_scale=config.data.image_scale_factor,
             resize_width_target=None,
             interpolation=config.data.interpolation,
+            resized_image_cache=ember.ResizedImageCacheConfig(
+                enabled=config.data.cache_resized_images,
+                cache_root=config.data.resized_image_cache_root,
+                max_caches=config.data.max_resized_image_caches,
+            ),
         ),
     )
 

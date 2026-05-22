@@ -514,53 +514,6 @@ def resolved_nht_fast_gs_scene_path(
 
 
 @app.function
-def nht_fast_gs_resized_cache_enabled(
-    config: NHTFastGSExperimentConfig,
-) -> bool:
-    """Return whether NHT-Fast-GS should use a derived image cache."""
-    return (
-        config.data.cache_resized_images
-        and config.data.image_scale_factor != 1.0
-    )
-
-
-@app.function
-def nht_fast_gs_source_image_root(
-    config: NHTFastGSExperimentConfig,
-) -> Path:
-    """Return the full-resolution source image root."""
-    if config.scene.image_root is not None:
-        return config.scene.image_root.expanduser()
-    return resolved_nht_fast_gs_scene_path(config) / "images"
-
-
-@app.function
-def nht_fast_gs_resized_cache_parent(
-    config: NHTFastGSExperimentConfig,
-) -> Path:
-    """Return the reusable derived image cache parent for the scene."""
-    if config.data.resized_image_cache_root is not None:
-        return config.data.resized_image_cache_root.expanduser()
-    return (
-        resolved_nht_fast_gs_scene_path(config)
-        / "ember_cache"
-        / "resized_images"
-    )
-
-
-@app.function
-def nht_fast_gs_resized_cache_root(
-    config: NHTFastGSExperimentConfig,
-) -> Path:
-    """Return the derived resized image cache root for this config."""
-    scale_name = f"{config.data.image_scale_factor:.6f}".rstrip("0").rstrip(".")
-    scale_name = scale_name.replace(".", "p")
-    return nht_fast_gs_resized_cache_parent(config) / (
-        f"scale_{scale_name}_{config.data.interpolation}"
-    )
-
-
-@app.function
 def nht_scene_load_config(
     config: NHTFastGSExperimentConfig,
 ) -> ember.ColmapSceneConfig:
@@ -570,19 +523,9 @@ def nht_scene_load_config(
     )
     scene_path = resolved_nht_fast_gs_scene_path(config)
     image_root = (
-        nht.materialize_nht_resized_image_cache(
-            source_root=nht_fast_gs_source_image_root(config),
-            cache_root=nht_fast_gs_resized_cache_root(config),
-            scale=config.data.image_scale_factor,
-            interpolation=config.data.interpolation,
-            max_caches=config.data.max_resized_image_caches,
-        )
-        if nht_fast_gs_resized_cache_enabled(config)
-        else (
-            config.scene.image_root.expanduser()
-            if config.scene.image_root is not None
-            else None
-        )
+        config.scene.image_root.expanduser()
+        if config.scene.image_root is not None
+        else None
     )
     return ember.ColmapSceneConfig(
         path=scene_path,
@@ -614,13 +557,14 @@ def nht_prepared_frame_dataset_config(
             num_workers=config.data.materialization_num_workers,
         ),
         image_preparation=ember.ImagePreparationConfig(
-            resize_width_scale=(
-                None
-                if nht_fast_gs_resized_cache_enabled(config)
-                else config.data.image_scale_factor
-            ),
+            resize_width_scale=config.data.image_scale_factor,
             normalize=config.data.normalize_images,
             interpolation=config.data.interpolation,
+            resized_image_cache=ember.ResizedImageCacheConfig(
+                enabled=config.data.cache_resized_images,
+                cache_root=config.data.resized_image_cache_root,
+                max_caches=config.data.max_resized_image_caches,
+            ),
         ),
     )
 
@@ -875,20 +819,61 @@ def _(frame_view_catalog, is_script_mode):
 
 @app.cell
 def _(
+    current_config,
+    frame_dataset_error,
     frame_view_catalog,
+    is_script_mode,
+    scene_load_error,
     training_inspector,
     training_inspector_refresh,
+    training_result,
+    training_viewer_error,
     training_viewer_handle,
 ):
-    training_viewer = (
-        None
-        if training_inspector is None
-        else training_inspector.panel(
+    training_snapshot = ember_splatting.snapshot_training_viewer(
+        training_viewer_handle
+    )
+    running_notice_text = None
+    if (
+        training_snapshot is not None
+        and nht_fast_gs_should_show_jit_compile_notice(
+            current_config,
+            training_snapshot,
+            is_script_mode=is_script_mode,
+        )
+    ):
+        running_notice_text = (
+            "NHT shader JIT compilation is likely running. The first "
+            "training step can take a while; progress and metrics will "
+            "appear after compilation finishes."
+        )
+    preview_status_panel = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            preparation_errors=[
+                ("Scene loading failed", scene_load_error),
+                ("Frame dataset preparation failed", frame_dataset_error),
+                (
+                    "Training inspector preparation failed",
+                    training_viewer_error,
+                ),
+            ],
+            training_result=training_result,
+            running_notice_text=running_notice_text,
+        )
+    )
+    if training_inspector is None:
+        training_viewer = preview_status_panel
+    else:
+        fixed_view_panel = training_inspector.panel(
             training_viewer_handle,
             frame_view_catalog,
             refresh=training_inspector_refresh,
         )
-    )
+        training_viewer = mo.vstack(
+            [preview_status_panel, fixed_view_panel],
+            gap=0.75,
+        ).style(max_height="none", overflow="visible")
     return (training_viewer,)
 
 

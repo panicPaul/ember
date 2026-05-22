@@ -5,6 +5,8 @@ __pycache__/
 *.ply
 todays-todos.md
 .path_defaults.json
+.ember/
+*.pdf
 
 simplex-splatting
 private-playground

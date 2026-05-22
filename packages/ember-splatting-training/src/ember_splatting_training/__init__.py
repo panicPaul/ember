@@ -89,9 +89,22 @@ __all__ = [
     "training_inspector_spinner",
     "training_preparation_outputs",
     "training_status_snapshot_from_result",
+    "training_view_default_starred_views_path",
+    "training_view_empty_starred_views",
     "training_view_image_loss_terms",
+    "training_view_is_starred",
+    "training_view_normalize_starred_views",
+    "training_view_read_starred_views",
     "training_view_render_mode_options",
     "training_view_render_modes_for_config",
+    "training_view_scene_star_key",
+    "training_view_star_entry",
+    "training_view_star_entry_id",
+    "training_view_star_id",
+    "training_view_starred_view_ids",
+    "training_view_starred_views_path",
+    "training_view_starred_views_with_toggled_view",
+    "training_view_write_starred_views",
     "viridis_error_map",
 ]
 
@@ -177,9 +190,22 @@ def __getattr__(name: str) -> object:
             | "training_config_for_notebook_thread"
             | "training_preparation_outputs"
             | "training_status_snapshot_from_result"
+            | "training_view_default_starred_views_path"
+            | "training_view_empty_starred_views"
             | "training_view_image_loss_terms"
+            | "training_view_is_starred"
+            | "training_view_normalize_starred_views"
+            | "training_view_read_starred_views"
             | "training_view_render_mode_options"
             | "training_view_render_modes_for_config"
+            | "training_view_scene_star_key"
+            | "training_view_star_entry"
+            | "training_view_star_entry_id"
+            | "training_view_star_id"
+            | "training_view_starred_view_ids"
+            | "training_view_starred_views_path"
+            | "training_view_starred_views_with_toggled_view"
+            | "training_view_write_starred_views"
             | "viridis_error_map"
         ):
             from ember_splatting_training import training_viewer

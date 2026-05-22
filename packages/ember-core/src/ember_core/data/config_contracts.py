@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC
+from pathlib import Path
 from typing import Literal
 
 from pydantic import BaseModel, Field, SerializeAsAny, model_validator
@@ -108,6 +109,27 @@ class MaterializationConfig(DataConfigBase):
         return self
 
 
+class ResizedImageCacheConfig(DataConfigBase):
+    """Reusable on-disk cache policy for resized path-backed images."""
+
+    enabled: bool = Field(
+        default=True,
+        description="Whether to cache resized path-backed images on disk.",
+    )
+    cache_root: Path | None = Field(
+        default=None,
+        description=(
+            "Parent directory for scale-specific resized image caches. "
+            "Defaults to <scene>/ember_cache/resized_images when available."
+        ),
+    )
+    max_caches: int = Field(
+        default=4,
+        ge=1,
+        description="Maximum number of sibling resized-image caches to retain.",
+    )
+
+
 class ImagePreparationConfig(DataConfigBase):
     """Image preprocessing policy for prepared frame datasets."""
 
@@ -130,6 +152,13 @@ class ImagePreparationConfig(DataConfigBase):
     interpolation: Literal["nearest", "bilinear", "bicubic"] = Field(
         default="bicubic",
         description="Interpolation mode used when resizing images.",
+    )
+    resized_image_cache: ResizedImageCacheConfig | None = Field(
+        default_factory=ResizedImageCacheConfig,
+        description=(
+            "Optional on-disk cache for resized path-backed images. Use None "
+            "or enabled=False to keep resize work in the prepared-sample path."
+        ),
     )
 
     @model_validator(mode="after")
@@ -193,6 +222,7 @@ __all__ = [
     "ImagePreparationConfig",
     "MaterializationConfig",
     "PreparedFrameDatasetConfig",
+    "ResizedImageCacheConfig",
     "SceneLoadConfig",
     "SplitConfig",
 ]

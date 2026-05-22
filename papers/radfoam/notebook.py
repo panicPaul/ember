@@ -297,20 +297,41 @@ def _(frame_view_catalog, is_script_mode):
 
 @app.cell
 def _(
+    frame_dataset_error,
     frame_view_catalog,
+    scene_load_error,
     training_inspector,
     training_inspector_refresh,
+    training_result,
+    training_viewer_error,
     training_viewer_handle,
 ):
-    training_viewer = (
-        None
-        if training_inspector is None
-        else training_inspector.panel(
+    preview_status_panel = (
+        ember_splatting.render_training_status_panel_from_handle(
+            training_viewer_handle,
+            preparation_errors=[
+                ("Scene loading failed", scene_load_error),
+                ("Frame dataset preparation failed", frame_dataset_error),
+                (
+                    "Training inspector preparation failed",
+                    training_viewer_error,
+                ),
+            ],
+            training_result=training_result,
+        )
+    )
+    if training_inspector is None:
+        training_viewer = preview_status_panel
+    else:
+        fixed_view_panel = training_inspector.panel(
             training_viewer_handle,
             frame_view_catalog,
             refresh=training_inspector_refresh,
         )
-    )
+        training_viewer = mo.vstack(
+            [preview_status_panel, fixed_view_panel],
+            gap=0.75,
+        ).style(max_height="none", overflow="visible")
     return (training_viewer,)
 
 

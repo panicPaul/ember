@@ -18,6 +18,7 @@ from ember_core.data import (
     DatasetSensor,
     HorizonAdjustmentSpec,
     HorizonAlignPipeConfig,
+    ImagePreparationConfig,
     ImagePreparationSpec,
     MaterializationConfig,
     MaterializationProgress,
@@ -28,6 +29,7 @@ from ember_core.data import (
     PreparedFrameDataset,
     PreparedFrameDatasetConfig,
     PreparedFrameViewCatalog,
+    ResizedImageCacheConfig,
     ResizeSpec,
     SceneRecord,
     SplitConfig,
@@ -676,6 +678,96 @@ def test_prepared_frame_view_catalog_eager_training_dataset_drops_worker_cache(
     assert sample.image.shape == (3, 4, 3)
 
 
+def test_prepared_frame_dataset_uses_resized_image_cache(
+    tmp_path: Path,
+) -> None:
+    camera_sensor = _build_camera_sensor(
+        sensor_id="camera",
+        frame_colors=((255, 0, 0), (0, 255, 0)),
+        root=tmp_path / "images",
+    )
+    scene_record = SceneRecord(
+        sensors=(camera_sensor,),
+        source_format="ncore",
+        default_camera_sensor_id="camera",
+        source_uris=(str(tmp_path),),
+    )
+
+    dataset = PreparedFrameDataset(
+        scene_record,
+        config=PreparedFrameDatasetConfig(
+            split=None,
+            materialization=MaterializationConfig(
+                stage="prepared",
+                mode="lazy",
+                num_workers=0,
+            ),
+            image_preparation=ImagePreparationConfig(
+                normalize=False,
+                resize_width_scale=0.5,
+                interpolation="nearest",
+                resized_image_cache=ResizedImageCacheConfig(max_caches=4),
+            ),
+        ),
+    )
+    sample = dataset[0]
+    cached_source = dataset.camera_stream.image_source
+    assert isinstance(cached_source, PathCameraImageSource)
+
+    assert dataset.preparation.resize is None
+    assert sample.image.shape == (2, 2, 3)
+    assert sample.frame.width == 2
+    assert sample.frame.height == 2
+    assert int(sample.camera.width[0].item()) == 2
+    assert int(sample.camera.height[0].item()) == 2
+    assert cached_source.path_for_frame(sample.frame) == (
+        tmp_path
+        / "ember_cache"
+        / "resized_images"
+        / "scale_0p5_nearest"
+        / "camera_0.png"
+    )
+
+
+def test_resized_image_cache_eviction_preserves_active_cache(
+    tmp_path: Path,
+) -> None:
+    cache_parent = tmp_path / "ember_cache" / "resized_images"
+    stale_cache = cache_parent / "scale_0p125_nearest"
+    stale_cache.mkdir(parents=True)
+    camera_sensor = _build_camera_sensor(
+        sensor_id="camera",
+        frame_colors=((255, 0, 0), (0, 255, 0)),
+        root=tmp_path / "images",
+    )
+    scene_record = SceneRecord(
+        sensors=(camera_sensor,),
+        source_format="ncore",
+        default_camera_sensor_id="camera",
+        source_uris=(str(tmp_path),),
+    )
+
+    PreparedFrameDataset(
+        scene_record,
+        config=PreparedFrameDatasetConfig(
+            split=None,
+            materialization=MaterializationConfig(
+                stage="prepared",
+                mode="lazy",
+                num_workers=0,
+            ),
+            image_preparation=ImagePreparationConfig(
+                resize_width_scale=0.5,
+                interpolation="nearest",
+                resized_image_cache=ResizedImageCacheConfig(max_caches=1),
+            ),
+        ),
+    )
+
+    assert not stale_cache.exists()
+    assert (cache_parent / "scale_0p5_nearest").exists()
+
+
 def test_materialization_config_rejects_single_worker() -> None:
     with pytest.raises(ValueError, match="0, None, or >= 2"):
         MaterializationConfig(num_workers=1)
@@ -828,6 +920,11 @@ def test_colmap_scene_and_prepared_frame_defaults_are_split() -> None:
         "resize_width_scale": None,
         "resize_width_target": None,
         "interpolation": "bicubic",
+        "resized_image_cache": {
+            "enabled": True,
+            "cache_root": None,
+            "max_caches": 4,
+        },
     }
 
 
@@ -843,6 +940,11 @@ def test_mipnerf360_indoor_prepared_frame_config_uses_quarter_scale_resize() -> 
         "resize_width_scale": 0.25,
         "resize_width_target": None,
         "interpolation": "bicubic",
+        "resized_image_cache": {
+            "enabled": True,
+            "cache_root": None,
+            "max_caches": 4,
+        },
     }
 
 
@@ -858,6 +960,11 @@ def test_mipnerf360_outdoor_prepared_frame_config_uses_half_scale_resize() -> (
         "resize_width_scale": 0.5,
         "resize_width_target": None,
         "interpolation": "bicubic",
+        "resized_image_cache": {
+            "enabled": True,
+            "cache_root": None,
+            "max_caches": 4,
+        },
     }
 
 

@@ -6,9 +6,7 @@ __generated_with = "0.23.3"
 app = marimo.App(width="columns")
 
 with app.setup:
-    import json
     import os
-    import shutil
     from dataclasses import dataclass
     from pathlib import Path
     from time import perf_counter
@@ -412,175 +410,12 @@ def parse_worker_counts(
 
 
 @app.function
-def benchmark_cache_enabled(config) -> bool:
-    """Return whether benchmark loading should use a resized image cache."""
-    return config.cache_resized_images and config.image_scale_factor != 1.0
-
-
-@app.function
-def benchmark_source_image_root(dataset_config) -> Path:
-    """Return the full-resolution source image root."""
-    return dataset_config.path.expanduser() / "images"
-
-
-@app.function
-def benchmark_resized_cache_parent(dataset_config, benchmark_config) -> Path:
-    """Return the reusable resized image cache parent."""
-    if benchmark_config.resized_image_cache_root is not None:
-        return benchmark_config.resized_image_cache_root.expanduser()
-    return (
-        dataset_config.path.expanduser()
-        / "ember_cache"
-        / "resized_images"
-    )
-
-
-@app.function
-def benchmark_resized_cache_root(dataset_config, benchmark_config) -> Path:
-    """Return the derived resized image cache root."""
-    scale_name = (
-        f"{benchmark_config.image_scale_factor:.6f}".rstrip("0").rstrip(".")
-    )
-    scale_name = scale_name.replace(".", "p")
-    return benchmark_resized_cache_parent(dataset_config, benchmark_config) / (
-        f"scale_{scale_name}_{benchmark_config.interpolation}"
-    )
-
-
-@app.function
-def benchmark_pillow_resampling(interpolation: str) -> Any:
-    """Translate interpolation names to Pillow resampling filters."""
-    from PIL import Image
-
-    if interpolation == "nearest":
-        return Image.Resampling.NEAREST
-    if interpolation == "bilinear":
-        return Image.Resampling.BILINEAR
-    if interpolation == "bicubic":
-        return Image.Resampling.BICUBIC
-    raise ValueError(f"Unsupported interpolation mode {interpolation!r}.")
-
-
-@app.function
-def enforce_resized_cache_limit(cache_root: Path, max_caches: int) -> None:
-    """Keep only a bounded number of resized image caches."""
-    parent = cache_root.parent
-    if not parent.exists():
-        return
-    cache_dirs = [
-        path
-        for path in parent.iterdir()
-        if path.is_dir() and path.name.startswith("scale_")
-    ]
-    overflow = len(cache_dirs) - max_caches
-    if overflow <= 0:
-        return
-    evictable = sorted(
-        (path for path in cache_dirs if path != cache_root),
-        key=lambda path: path.stat().st_mtime,
-    )
-    for stale_cache in evictable[:overflow]:
-        shutil.rmtree(stale_cache)
-
-
-@app.function
-def materialize_resized_image_cache(
-    *,
-    source_root: Path,
-    cache_root: Path,
-    scale: float,
-    interpolation: str,
-    max_caches: int,
-) -> Path:
-    """Create/update a derived resized image cache from full-res images."""
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    from PIL import Image
-    from tqdm.auto import tqdm
-
-    image_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    source_paths = sorted(
-        path
-        for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in image_suffixes
-    )
-    if not source_paths:
-        raise ValueError(f"No source images found under {source_root}.")
-    resampling = benchmark_pillow_resampling(interpolation)
-    enforce_resized_cache_limit(cache_root, max_caches)
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    def resize_one(source_path: Path) -> None:
-        relative_path = source_path.relative_to(source_root)
-        target_path = cache_root / relative_path
-        if (
-            target_path.exists()
-            and target_path.stat().st_mtime >= source_path.stat().st_mtime
-        ):
-            return
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(source_path) as image:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-            resized = rgb.resize(
-                (
-                    max(1, round(width * scale)),
-                    max(1, round(height * scale)),
-                ),
-                resampling,
-            )
-            save_kwargs = (
-                {"quality": 95}
-                if target_path.suffix.lower() in {".jpg", ".jpeg"}
-                else {}
-            )
-            resized.save(target_path, **save_kwargs)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(resize_one, path) for path in source_paths]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc="Preparing resized image cache",
-        ):
-            future.result()
-    (cache_root / "cache_metadata.json").write_text(
-        json.dumps(
-            {
-                "source_root": str(source_root),
-                "scale": scale,
-                "interpolation": interpolation,
-                "num_images": len(source_paths),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    cache_root.touch()
-    enforce_resized_cache_limit(cache_root, max_caches)
-    return cache_root
-
-
-@app.function
 def load_benchmark_scene_record(dataset_config, benchmark_config):
-    """Load scene record for the benchmark, optionally through a resized cache."""
-    image_root = (
-        materialize_resized_image_cache(
-            source_root=benchmark_source_image_root(dataset_config),
-            cache_root=benchmark_resized_cache_root(
-                dataset_config, benchmark_config
-            ),
-            scale=benchmark_config.image_scale_factor,
-            interpolation=benchmark_config.interpolation,
-            max_caches=benchmark_config.max_resized_image_caches,
-        )
-        if benchmark_cache_enabled(benchmark_config)
-        else None
-    )
+    """Load the scene record for the dataloader benchmark."""
     return ember.load_scene_record(
         ember.ColmapSceneConfig(
             path=dataset_config.path,
-            image_root=image_root,
+            image_root=None,
             source_pipes=(
                 ember.HorizonAlignPipeConfig(
                     enabled=dataset_config.apply_horizon_adjustment
@@ -613,12 +448,13 @@ def build_benchmark_frame_dataset(scene_record, benchmark_config):
             ),
             image_preparation=ember.ImagePreparationConfig(
                 normalize=benchmark_config.normalize_images,
-                resize_width_scale=(
-                    None
-                    if benchmark_cache_enabled(benchmark_config)
-                    else benchmark_config.image_scale_factor
-                ),
+                resize_width_scale=benchmark_config.image_scale_factor,
                 interpolation=benchmark_config.interpolation,
+                resized_image_cache=ember.ResizedImageCacheConfig(
+                    enabled=benchmark_config.cache_resized_images,
+                    cache_root=benchmark_config.resized_image_cache_root,
+                    max_caches=benchmark_config.max_resized_image_caches,
+                ),
             ),
         ),
     )

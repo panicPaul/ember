@@ -217,7 +217,13 @@ def test_stoch3dgs_prepared_frame_dataset_config_uses_current_split_config() -> 
     assert dataset_config.split.target == config.data.split_target
     assert dataset_config.split.every_n == config.data.split_every_n
     assert dataset_config.image_preparation is not None
-    assert dataset_config.image_preparation.resize_width_scale is None
+    assert dataset_config.image_preparation.resize_width_scale == (
+        config.data.image_scale_factor
+    )
+    cache_config = dataset_config.image_preparation.resized_image_cache
+    assert cache_config is not None
+    assert cache_config.enabled is True
+    assert cache_config.max_caches == config.data.max_resized_image_caches
 
 
 def test_stoch3dgs_active_sh_scene_masks_inactive_coefficients() -> None:

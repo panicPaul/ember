@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import argparse
-import json
-import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
 
 import torch
 from torch.utils.data import DataLoader
@@ -19,6 +15,7 @@ from ember_core.data import (
     MaterializationConfig,
     PreparedFrameDataset,
     PreparedFrameDatasetConfig,
+    ResizedImageCacheConfig,
     collate_frame_samples,
     load_colmap_scene_record,
     resolve_colmap_scene_path,
@@ -71,142 +68,9 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _pillow_resampling(interpolation: str) -> Any:
-    from PIL import Image
-
-    if interpolation == "nearest":
-        return Image.Resampling.NEAREST
-    if interpolation == "bilinear":
-        return Image.Resampling.BILINEAR
-    if interpolation == "bicubic":
-        return Image.Resampling.BICUBIC
-    raise ValueError(f"Unsupported interpolation mode {interpolation!r}.")
-
-
-def _resized_cache_root(args: argparse.Namespace, dataset_root: Path) -> Path:
-    parent = (
-        args.resized_image_cache_root
-        if args.resized_image_cache_root is not None
-        else dataset_root / "ember_cache" / "resized_images"
-    )
-    scale_name = f"{args.resize_width_scale:.6f}".rstrip("0").rstrip(".")
-    scale_name = scale_name.replace(".", "p")
-    return parent / f"scale_{scale_name}_{args.interpolation}"
-
-
-def _enforce_resized_cache_limit(cache_root: Path, max_caches: int) -> None:
-    parent = cache_root.parent
-    if not parent.exists():
-        return
-    cache_dirs = [
-        path
-        for path in parent.iterdir()
-        if path.is_dir() and path.name.startswith("scale_")
-    ]
-    overflow = len(cache_dirs) - max_caches
-    if overflow <= 0:
-        return
-    evictable = sorted(
-        (path for path in cache_dirs if path != cache_root),
-        key=lambda path: path.stat().st_mtime,
-    )
-    for stale_cache in evictable[:overflow]:
-        shutil.rmtree(stale_cache)
-
-
-def _materialize_resized_image_cache(
-    args: argparse.Namespace,
-    dataset_root: Path,
-) -> Path:
-    if args.resize_width_scale is None:
-        raise ValueError(
-            "--cache-resized-images requires --resize-width-scale."
-        )
-    source_root = dataset_root / "images"
-    if not source_root.exists():
-        raise ValueError(f"No source image directory found at {source_root}.")
-    cache_root = _resized_cache_root(args, dataset_root)
-    image_suffixes = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    source_paths = sorted(
-        path
-        for path in source_root.rglob("*")
-        if path.is_file() and path.suffix.lower() in image_suffixes
-    )
-    if not source_paths:
-        raise ValueError(f"No source images found under {source_root}.")
-
-    from tqdm.auto import tqdm
-
-    resampling = _pillow_resampling(args.interpolation)
-    _enforce_resized_cache_limit(cache_root, args.max_resized_image_caches)
-    cache_root.mkdir(parents=True, exist_ok=True)
-
-    def resize_one(source_path: Path) -> None:
-        from PIL import Image
-
-        relative_path = source_path.relative_to(source_root)
-        target_path = cache_root / relative_path
-        if (
-            target_path.exists()
-            and target_path.stat().st_mtime >= source_path.stat().st_mtime
-        ):
-            return
-        target_path.parent.mkdir(parents=True, exist_ok=True)
-        with Image.open(source_path) as image:
-            rgb = image.convert("RGB")
-            width, height = rgb.size
-            resized = rgb.resize(
-                (
-                    max(1, round(width * args.resize_width_scale)),
-                    max(1, round(height * args.resize_width_scale)),
-                ),
-                resampling,
-            )
-            save_kwargs = (
-                {"quality": 95}
-                if target_path.suffix.lower() in {".jpg", ".jpeg"}
-                else {}
-            )
-            resized.save(target_path, **save_kwargs)
-
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = [executor.submit(resize_one, path) for path in source_paths]
-        for future in tqdm(
-            as_completed(futures),
-            total=len(futures),
-            desc="Preparing resized image cache",
-            disable=not args.progress,
-        ):
-            future.result()
-
-    (cache_root / "cache_metadata.json").write_text(
-        json.dumps(
-            {
-                "source_root": str(source_root),
-                "scale": args.resize_width_scale,
-                "interpolation": args.interpolation,
-                "num_images": len(source_paths),
-            },
-            indent=2,
-            sort_keys=True,
-        )
-    )
-    cache_root.touch()
-    _enforce_resized_cache_limit(cache_root, args.max_resized_image_caches)
-    return cache_root
-
-
 def _build_dataloader(args: argparse.Namespace) -> DataLoader[object]:
     dataset_root = resolve_colmap_scene_path(args.colmap_root)
-    cached_image_root = (
-        _materialize_resized_image_cache(args, dataset_root)
-        if args.cache_resized_images
-        else None
-    )
-    scene_record = load_colmap_scene_record(
-        dataset_root,
-        image_root=cached_image_root,
-    )
+    scene_record = load_colmap_scene_record(dataset_root)
     frame_dataset = PreparedFrameDataset(
         scene_record,
         config=PreparedFrameDatasetConfig(
@@ -218,11 +82,14 @@ def _build_dataloader(args: argparse.Namespace) -> DataLoader[object]:
             ),
             image_preparation=ImagePreparationConfig(
                 normalize=not args.no_normalize,
-                resize_width_scale=(
-                    None if cached_image_root is not None else args.resize_width_scale
-                ),
+                resize_width_scale=args.resize_width_scale,
                 resize_width_target=args.resize_width_target,
                 interpolation=args.interpolation,
+                resized_image_cache=ResizedImageCacheConfig(
+                    enabled=args.cache_resized_images,
+                    cache_root=args.resized_image_cache_root,
+                    max_caches=args.max_resized_image_caches,
+                ),
             ),
         ),
     )

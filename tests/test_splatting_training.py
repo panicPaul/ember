@@ -73,6 +73,7 @@ from ember_splatting_training.training_viewer import (
     TrainingViewerErrorMap,
     TrainingViewerHandle,
     TrainingViewerHook,
+    TrainingViewInspection,
     TrainingViewInspectorConfig,
     TrainingViewMapSpec,
     TrainingViserViewerConfig,
@@ -1166,6 +1167,7 @@ def test_training_viewer_default_snapshot_cadence_is_100() -> None:
 def test_format_training_metric_parts_can_be_compact_or_verbose() -> None:
     metrics = {
         "loss": 1.25,
+        "mcmc_relocated_count": 3.0,
         "render_hit_count_q05": 0.0,
         "render_hit_count_mean": 4.0,
         "scene_vertex_features_abs_mean": 9.0,
@@ -1178,6 +1180,7 @@ def test_format_training_metric_parts_can_be_compact_or_verbose() -> None:
         "loss=1.25",
         "render_hit_count_q05=0",
         "render_hit_count_mean=4",
+        "mcmc_relocated_count=3",
     ]
     assert "scene_vertex_features_abs_mean=9" not in compact
     assert "scene_vertex_features_abs_mean=9" in verbose
@@ -1197,6 +1200,7 @@ def test_format_training_status_includes_runtime_metrics() -> None:
         elapsed_seconds=12.2,
         eta_seconds=1.1,
         primitive_count=1234,
+        render_error_text="OutOfMemoryError: CUDA out of memory.",
     )
 
     status_text = format_training_status(snapshot)
@@ -1207,6 +1211,10 @@ def test_format_training_status_includes_runtime_metrics() -> None:
     assert "ssim_loss=0.02" in status_text
     assert "primitives=1,234" in status_text
     assert "it/s=50.00" in status_text
+    assert (
+        "Render preview warning: `OutOfMemoryError: CUDA out of memory.`"
+        in status_text
+    )
     assert format_training_duration(61.2) == "1m 01s"
 
 
@@ -1340,6 +1348,8 @@ def test_render_training_status_panel_from_handle_accepts_handle_snapshot() -> (
 def test_training_view_inspector_config_validates_l1_range() -> None:
     config = TrainingViewInspectorConfig()
 
+    assert config.enable_starred_views is True
+    assert config.starred_views_path is None
     assert config.l1_range == (0.0, 0.2)
     assert config.image_loss_range == (0.0, 0.2)
     assert config.ssim_range == (0.0, 0.2)
@@ -1348,6 +1358,164 @@ def test_training_view_inspector_config_validates_l1_range() -> None:
         TrainingViewInspectorConfig(l1_range=(0.0, 2.0))
     with pytest.raises(ValueError, match="psnr_range must lie"):
         TrainingViewInspectorConfig(psnr_range=(0.0, 120.0))
+
+
+def _training_view_ref(
+    split: str,
+    index: int,
+    source_index: int,
+    frame_id: str,
+    label: str,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        split=split,
+        index=index,
+        source_index=source_index,
+        frame_id=frame_id,
+        label=label,
+        key=f"{split}:{index}:{source_index}",
+    )
+
+
+class _TrainingViewCatalog:
+    def __init__(
+        self,
+        *,
+        source_uri: str = "file:///scene-a",
+        camera_sensor_id: str | None = None,
+    ) -> None:
+        self.views_by_split = {
+            "val": (
+                _training_view_ref("val", 0, 10, "frame-a", "val a"),
+                _training_view_ref("val", 1, 11, "frame-b", "val b"),
+            ),
+            "train": (
+                _training_view_ref("train", 0, 20, "frame-c", "train c"),
+                _training_view_ref("train", 1, 21, "frame-d", "train d"),
+            ),
+        }
+        self.scene_record = SimpleNamespace(
+            default_camera_sensor_id="cam0",
+            num_frames=4,
+            root_path=None,
+            source_format="colmap",
+            source_uris=(source_uri,),
+        )
+        self.config = SimpleNamespace(camera_sensor_id=camera_sensor_id)
+
+    def views(self, split: str) -> tuple[SimpleNamespace, ...]:
+        return self.views_by_split[split]
+
+    def view_ref_by_key(self, key: str | None) -> SimpleNamespace | None:
+        for views in self.views_by_split.values():
+            for view_ref in views:
+                if view_ref.key == key:
+                    return view_ref
+        return None
+
+
+def test_training_view_starred_views_default_path_is_repo_local(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    nested_dir = project_root / "notebooks"
+    nested_dir.mkdir(parents=True)
+    (project_root / "pyproject.toml").write_text("[project]\nname='demo'\n")
+    monkeypatch.chdir(nested_dir)
+
+    path = training_viewer_module.training_view_default_starred_views_path()
+
+    assert path == project_root / ".ember" / "training_view_stars.json"
+    assert training_viewer_module.training_view_starred_views_path(
+        tmp_path / "custom.json"
+    ) == tmp_path / "custom.json"
+
+
+def test_training_view_starred_views_are_dataset_scoped() -> None:
+    catalog_a = _TrainingViewCatalog(source_uri="file:///scene-a")
+    catalog_b = _TrainingViewCatalog(source_uri="file:///scene-b")
+
+    assert training_viewer_module.training_view_scene_star_key(
+        catalog_a
+    ) != training_viewer_module.training_view_scene_star_key(catalog_b)
+
+
+def test_training_view_persists_starred_view_payload(tmp_path: Path) -> None:
+    view_ref = _training_view_ref("train", 3, 42, "frame-0042", "train 0042")
+    scene_key = "scene-a"
+
+    payload = training_viewer_module.training_view_starred_views_with_toggled_view(
+        {"version": 1, "scenes": {}},
+        scene_key,
+        view_ref,
+    )
+    training_viewer_module.training_view_write_starred_views(
+        payload,
+        tmp_path / "stars.json",
+    )
+    loaded = training_viewer_module.training_view_read_starred_views(
+        tmp_path / "stars.json"
+    )
+
+    assert training_viewer_module.training_view_is_starred(
+        loaded,
+        scene_key,
+        view_ref,
+    )
+    assert (
+        training_viewer_module.training_view_starred_view_ids(
+            loaded,
+            "scene-b",
+        )
+        == set()
+    )
+    unstarred = (
+        training_viewer_module.training_view_starred_views_with_toggled_view(
+            loaded,
+            scene_key,
+            view_ref,
+        )
+    )
+    assert not training_viewer_module.training_view_is_starred(
+        unstarred,
+        scene_key,
+        view_ref,
+    )
+
+
+def test_training_view_starred_options_sort_first_and_wrap() -> None:
+    catalog = _TrainingViewCatalog()
+    starred_ids = {"val:11:frame-b"}
+
+    options = training_viewer_module._view_key_options(
+        catalog,
+        "val",
+        starred_ids,
+    )
+
+    assert list(options) == ["* val b", "val a"]
+    assert list(options.values()) == ["val:1:11", "val:0:10"]
+    assert (
+        training_viewer_module._neighbor_view_key(
+            catalog,
+            "val",
+            "val:1:11",
+            1,
+            starred_ids,
+        )
+        == "val:0:10"
+    )
+    assert (
+        training_viewer_module._neighbor_view_key(
+            catalog,
+            "val",
+            "val:0:10",
+            1,
+            starred_ids,
+        )
+        == "val:1:11"
+    )
 
 
 class _NoValueElement:
@@ -1626,6 +1794,7 @@ class _FakeTrainingViewerHandle:
         self.render_count = 0
         self.pause_count = 0
         self.progress_count = 0
+        self.inspection_count = 0
         self.active_checks = 0
 
     @property
@@ -1651,6 +1820,10 @@ class _FakeTrainingViewerHandle:
         del state, metrics
         self.progress_count += 1
 
+    def render_pending_inspection(self, state: TrainState) -> None:
+        del state
+        self.inspection_count += 1
+
     def maybe_rerender_after_step(self, state: TrainState) -> None:
         del state
         self.render_count += 1
@@ -1672,6 +1845,7 @@ def test_training_viewer_hook_updates_and_renders_after_step() -> None:
     assert handle.attach_count == 1
     assert handle.pause_count == 1
     assert handle.progress_count == 1
+    assert handle.inspection_count == 1
     assert handle.render_count == 1
 
 
@@ -2485,7 +2659,9 @@ def test_training_viewer_rerender_cadence_respects_step_and_time() -> None:
     assert viewer.wait_values == [False]
 
 
-def test_training_run_publishes_render_snapshots_without_viewer() -> None:
+def test_training_run_does_not_clone_snapshots_without_live_viewer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     scene = GaussianScene3D(
         center_position=torch.zeros((1, 3)),
         log_scales=torch.zeros((1, 3)),
@@ -2513,9 +2689,267 @@ def test_training_run_publishes_render_snapshots_without_viewer() -> None:
         _running_in_notebook=True,
     )
 
+    def fail_if_cloned(model: object) -> object:
+        del model
+        raise AssertionError("fixed inspection should not clone the model")
+
+    monkeypatch.setattr(
+        training_viewer_module,
+        "_clone_model_for_render",
+        fail_if_cloned,
+    )
     handle.maybe_rerender_after_step(state)
 
-    assert handle.snapshot().render_step == 2
+    assert handle.snapshot().render_step is None
+
+
+def test_training_view_inspection_runs_on_training_thread_without_clone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scene = GaussianScene3D(
+        center_position=torch.zeros((1, 3)),
+        log_scales=torch.zeros((1, 3)),
+        quaternion_orientation=torch.zeros((1, 4)),
+        logit_opacity=torch.zeros((1,)),
+        feature=torch.ones((1, 1, 3)),
+        sh_degree=0,
+    )
+    state = TrainState(
+        model=InitializedModel(scene=scene, modules={}, parameters={}),
+        step=4,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    sample = PreparedFrameSample(
+        frame=DatasetFrame(
+            frame_id="frame_0",
+            sensor_id="camera",
+            camera_index=0,
+            width=2,
+            height=2,
+            timestamp_us=0,
+        ),
+        image=torch.zeros((2, 2, 3), dtype=torch.float32),
+        camera=_viewer_test_camera(2, 2),
+    )
+    render_count = 0
+
+    def render_once(model: InitializedModel, camera: CameraState) -> torch.Tensor:
+        nonlocal render_count
+        del camera
+        render_count += 1
+        assert not torch.is_grad_enabled()
+        return model.scene.feature[0, 0].expand(2, 2, 3)
+
+    def fail_if_cloned(model: object) -> object:
+        del model
+        raise AssertionError("fixed inspection should not clone the model")
+
+    stop_thread = threading.Event()
+    training_thread = threading.Thread(target=stop_thread.wait)
+    training_thread.start()
+    handle = TrainingViewerHandle(
+        config=TrainingViewerConfig(),
+        _training_config=SimpleNamespace(runtime=SimpleNamespace(max_steps=10)),
+    )
+    handle._status = "running"
+    handle._state = state
+    handle._render_fn = render_once
+    handle._thread = training_thread
+    monkeypatch.setattr(
+        training_viewer_module,
+        "_clone_model_for_render",
+        fail_if_cloned,
+    )
+    result: dict[str, TrainingViewInspection] = {}
+
+    try:
+        caller = threading.Thread(
+            target=lambda: result.setdefault(
+                "inspection",
+                handle.inspect_view(sample),
+            )
+        )
+        caller.start()
+        for _ in range(100):
+            with handle._lock:
+                has_pending = handle._pending_inspection is not None
+            if has_pending:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("inspection request was not queued")
+
+        handle.render_pending_inspection(state)
+        caller.join(timeout=2.0)
+    finally:
+        stop_thread.set()
+        training_thread.join(timeout=2.0)
+
+    assert not caller.is_alive()
+    inspection = result["inspection"]
+    assert render_count == 1
+    assert inspection.available is True
+    assert inspection.render_step == 4
+    assert handle.snapshot().render_step == 4
+    torch.testing.assert_close(inspection.l1_error, torch.ones((2, 2)))
+
+
+def test_training_view_inspection_coalesces_pending_requests() -> None:
+    scene = GaussianScene3D(
+        center_position=torch.zeros((1, 3)),
+        log_scales=torch.zeros((1, 3)),
+        quaternion_orientation=torch.zeros((1, 4)),
+        logit_opacity=torch.zeros((1,)),
+        feature=torch.ones((1, 1, 3)),
+        sh_degree=0,
+    )
+    state = TrainState(
+        model=InitializedModel(scene=scene, modules={}, parameters={}),
+        step=8,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+    first_sample = PreparedFrameSample(
+        frame=DatasetFrame(
+            frame_id="frame_0",
+            sensor_id="camera",
+            camera_index=0,
+            width=2,
+            height=2,
+            timestamp_us=0,
+        ),
+        image=torch.zeros((2, 2, 3), dtype=torch.float32),
+        camera=_viewer_test_camera(2, 2),
+    )
+    second_sample = PreparedFrameSample(
+        frame=DatasetFrame(
+            frame_id="frame_1",
+            sensor_id="camera",
+            camera_index=1,
+            width=2,
+            height=2,
+            timestamp_us=1,
+        ),
+        image=torch.ones((2, 2, 3), dtype=torch.float32),
+        camera=_viewer_test_camera(2, 2),
+    )
+    render_count = 0
+
+    def render_once(model: InitializedModel, camera: CameraState) -> torch.Tensor:
+        nonlocal render_count
+        del model, camera
+        render_count += 1
+        return torch.ones((2, 2, 3), dtype=torch.float32)
+
+    stop_thread = threading.Event()
+    training_thread = threading.Thread(target=stop_thread.wait)
+    training_thread.start()
+    handle = TrainingViewerHandle(
+        config=TrainingViewerConfig(),
+        _training_config=SimpleNamespace(runtime=SimpleNamespace(max_steps=10)),
+    )
+    handle._status = "running"
+    handle._state = state
+    handle._render_fn = render_once
+    handle._thread = training_thread
+    results: dict[str, TrainingViewInspection] = {}
+
+    try:
+        first_caller = threading.Thread(
+            target=lambda: results.setdefault(
+                "first",
+                handle.inspect_view(first_sample),
+            )
+        )
+        first_caller.start()
+        for _ in range(100):
+            with handle._lock:
+                has_pending = handle._pending_inspection is not None
+            if has_pending:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("first inspection request was not queued")
+        second_caller = threading.Thread(
+            target=lambda: results.setdefault(
+                "second",
+                handle.inspect_view(second_sample),
+            )
+        )
+        second_caller.start()
+        for _ in range(100):
+            with handle._lock:
+                pending = handle._pending_inspection
+                is_second = (
+                    pending is not None
+                    and pending.sample.frame.frame_id == "frame_1"
+                )
+            if is_second:
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("second inspection request did not replace the first")
+
+        handle.render_pending_inspection(state)
+        first_caller.join(timeout=2.0)
+        second_caller.join(timeout=2.0)
+    finally:
+        stop_thread.set()
+        training_thread.join(timeout=2.0)
+
+    assert not first_caller.is_alive()
+    assert not second_caller.is_alive()
+    assert render_count == 1
+    assert results["first"].available is False
+    assert results["second"].available is True
+    assert results["second"].render_step == 8
+    assert torch.equal(
+        results["second"].target_image,
+        torch.full((2, 2, 3), 255, dtype=torch.uint8),
+    )
+
+
+def test_training_viewer_render_snapshot_oom_keeps_training_running(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    viewer = _RecordingViewer()
+    handle = TrainingViewerHandle(
+        config=TrainingViewerConfig(
+            update_every_steps=1,
+            min_update_seconds=0.0,
+        ),
+        viewer=viewer,
+    )
+    handle._status = "running"
+    state = TrainState(
+        model=None,
+        step=1,
+        seed=0,
+        device=torch.device("cpu"),
+    )
+
+    def raise_out_of_memory(model: object) -> object:
+        del model
+        raise torch.OutOfMemoryError(
+            "CUDA out of memory. Tried to allocate 1.63 GiB."
+        )
+
+    monkeypatch.setattr(
+        training_viewer_module,
+        "_clone_model_for_render",
+        raise_out_of_memory,
+    )
+
+    handle.maybe_rerender_after_step(state)
+    snapshot = handle.snapshot()
+
+    assert snapshot.status == "running"
+    assert snapshot.render_step is None
+    assert snapshot.render_error_text == (
+        "OutOfMemoryError: CUDA out of memory. Tried to allocate 1.63 GiB."
+    )
+    assert viewer.wait_values == []
 
 
 class _ViewerCamera:

@@ -23,6 +23,7 @@ from ember_core.data.config_contracts import (
     ImagePreparationConfig,
     MaterializationConfig,
     PreparedFrameDatasetConfig,
+    ResizedImageCacheConfig,
     SceneLoadConfig,
     SplitConfig,
 )
@@ -68,6 +69,13 @@ from ember_core.data.pipes import (
 )
 from ember_core.data.postprocess import (
     adjust_scene_record_horizon as _adjust_scene_record_horizon,
+)
+from ember_core.data.resized_cache import (
+    enforce_resized_image_cache_limit,
+    materialize_resized_image_cache,
+    resized_image_cache_directory_name,
+    resized_image_cache_root,
+    resolve_resized_image_cache_for_dataset,
 )
 from ember_core.data.samples import (
     get_sample_scene_path,
@@ -242,6 +250,7 @@ __all__ = [
     "PreparedFrameViewSplit",
     "ResizePipeConfig",
     "ResizeSpec",
+    "ResizedImageCacheConfig",
     "SceneLoadConfig",
     "SceneRecord",
     "SceneSourceFormat",
@@ -252,14 +261,19 @@ __all__ = [
     "adjust_scene_record_horizon",
     "build_prepared_frame_view_catalog",
     "collate_frame_samples",
+    "enforce_resized_image_cache_limit",
     "get_sample_scene_path",
     "load_colmap_scene_record",
     "load_must3r_scene_record",
     "load_ncore_scene_record",
     "load_scene_record",
     "materialization_progress_callback",
+    "materialize_resized_image_cache",
     "prepare_frame_dataset",
+    "resized_image_cache_directory_name",
+    "resized_image_cache_root",
     "resolve_colmap_scene_path",
     "resolve_must3r_checkpoints",
+    "resolve_resized_image_cache_for_dataset",
     "run_must3r_scene_record",
 ]

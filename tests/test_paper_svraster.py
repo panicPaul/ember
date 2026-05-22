@@ -528,7 +528,13 @@ def test_svraster_prepared_frame_dataset_config_uses_resized_cache() -> None:
     assert dataset_config.split.target == "train"
     assert dataset_config.split.every_n == 8
     assert dataset_config.image_preparation is not None
-    assert dataset_config.image_preparation.resize_width_scale is None
+    assert dataset_config.image_preparation.resize_width_scale == (
+        config.data.image_scale_factor
+    )
+    cache_config = dataset_config.image_preparation.resized_image_cache
+    assert cache_config is not None
+    assert cache_config.enabled is True
+    assert cache_config.max_caches == config.data.max_resized_image_caches
     assert dataset_config.materialization is not None
     assert dataset_config.materialization.stage == "prepared"
     assert dataset_config.materialization.mode == "eager"

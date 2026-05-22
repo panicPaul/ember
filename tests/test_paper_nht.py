@@ -316,7 +316,13 @@ def test_nht_prepared_frame_dataset_config_uses_current_data_config() -> None:
     assert dataset_config.split is not None
     assert dataset_config.split.target == config.data.split_target
     assert dataset_config.image_preparation is not None
-    assert dataset_config.image_preparation.resize_width_scale is None
+    assert dataset_config.image_preparation.resize_width_scale == (
+        config.data.image_scale_factor
+    )
+    cache_config = dataset_config.image_preparation.resized_image_cache
+    assert cache_config is not None
+    assert cache_config.enabled == config.data.cache_resized_images
+    assert cache_config.max_caches == config.data.max_resized_image_caches
 
 
 def test_nht_deferred_shader_decodes_feature_render() -> None:
